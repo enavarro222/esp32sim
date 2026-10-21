@@ -52,8 +52,8 @@ with tracking issues where available that list items and what "done" means:
    ESP32-CAM with host JPEG (#328). Next candidates as firmware needs them; `--board waveshare-*`
    variants share the codec/PSRAM/I2C work.
 7. **Peripherals on demand** — LEDC, PCNT, ADC, SPI2/3 masters, I2S RX and the LCD side of
-   LCD_CAM are in ([peripherals.md](peripherals.md)). Left: the RX sides of RMT and UART DMA, TWAI,
-   LCD_CAM's i8080 mode. Each appears as "unknown register" in the log when a firmware needs it.
+   LCD_CAM (RGB and i8080) are in ([peripherals.md](peripherals.md)). Left: the RX sides of RMT and UART DMA, TWAI.
+   Each appears as "unknown register" in the log when a firmware needs it.
 8. **PIE completeness** — FFT, GPIO and s32 instruction groups (decoded, not executed).
 9. **Browser build (WebAssembly)** — done ([wasm.md](wasm.md)): the emulator in the page,
    hello_world / the panel with SID / Atech at real time in Chrome, with a wasm backend for the
