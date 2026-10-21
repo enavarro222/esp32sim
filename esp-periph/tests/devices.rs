@@ -75,6 +75,20 @@ fn timer_group_alarm_autoreload_and_deadline() {
     assert_eq!(Device::read(&mut g, 0x0) & (1 << 10), 1 << 10, "autoreload keeps the alarm");
 }
 
+#[test]
+fn timer_group_alarm_already_reached_fires_at_once() {
+    let mut g = TimerGroup::new();
+    Device::write(&mut g, 0x70, 1);
+    Device::write(&mut g, 0x18, 0); Device::write(&mut g, 0x20, 1);   // count = 0
+    Device::write(&mut g, 0x10, 0);                                    // alarm = 0: "now"
+    Device::write(&mut g, 0x0, (1 << 31) | (1 << 30) | (1 << 10));     // enabled, up, alarm, divider 65536
+    assert_eq!(Device::next_deadline(&g), Some(0));
+    Device::tick(&mut g, 1);
+    assert_eq!(Device::irq_sources(&g), 1, "fired without a counter step");
+    assert_eq!(Device::read(&mut g, 0x0) & (1 << 10), 0, "one-shot: alarm disarmed");
+    assert_eq!(Device::next_deadline(&g), None);
+}
+
 // ------------------------------------------------------------------ GPIO
 #[test]
 fn gpio_edges_and_interrupt_types() {

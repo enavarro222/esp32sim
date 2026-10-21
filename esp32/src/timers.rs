@@ -14,7 +14,10 @@ pub struct ClassicTimer {
 
 impl ClassicTimer {
     pub fn new(_group: usize) -> Self {
-        Self { timer: TimerGroup::new(), lact: Timer::default(), lact_rtc: 0 }
+        // the classic timer group's behaviour for an alarm already passed is not compared with silicon
+        let mut timer = TimerGroup::new();
+        for t in &mut timer.t { t.fires_when_reached = false; }
+        Self { timer, lact: Timer::default(), lact_rtc: 0 }
     }
 
     fn irq_bits(&self) -> u64 {

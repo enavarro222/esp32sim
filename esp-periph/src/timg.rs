@@ -11,7 +11,9 @@ pub struct TimerGroup {
     pub int_raw: u32, pub int_ena: u32,
 }
 #[derive(Default, Clone, Copy)]
-pub struct Timer { pub config: u32, pub count: u64, pub latch: u64, pub alarm: u64, pub load: u64, pub prescale_acc: u64 }
+pub struct Timer { pub config: u32, pub count: u64, pub latch: u64, pub alarm: u64, pub load: u64, pub prescale_acc: u64,
+                   /// An armed alarm the counter already reached fires at once (S3/C3/C6 timer groups).
+                   pub fires_when_reached: bool }
 impl Timer {
     pub fn read(&self, o: u32) -> u32 {
         match o { 0x0 => self.config, 0x4 => self.latch as u32, 0x8 => (self.latch >> 32) as u32, 0x10 => self.alarm as u32, 0x14 => (self.alarm >> 32) as u32, 0x18 => self.load as u32, 0x1c => (self.load >> 32) as u32, _ => 0 }
@@ -32,6 +34,12 @@ impl Timer {
     pub fn step(&mut self, apb_ticks: u64, width_mask: u64, mut on_alarm: impl FnMut()) {
         let t = self;
         if t.config & (1 << 31) == 0 { return; }   // TIMG_T0_EN
+        // A one-shot alarm armed at or behind the counter fires now: esp-rtos 0.4 (esp-hal 1.2) arms
+        // 0 ticks for a wake-up due within one tick (the XTAL / 65536 clock: 1.6 ms) and relies on it.
+        if t.reached_one_shot() {
+            on_alarm();
+            t.config &= !(1 << 10);
+        }
         let div = ((t.config >> 13) & 0xffff) as u64;
         let div = if div == 0 { 65536 } else { div };
         t.prescale_acc += apb_ticks;
@@ -56,6 +64,13 @@ impl Timer {
         }
         t.count = if inc { t.count.wrapping_add(steps) & width_mask } else { t.count.wrapping_sub(steps) & width_mask };
     }
+    /// An armed one-shot alarm (no autoreload) that the counter already reached, on a timer that
+    /// fires those at once. Autoreload with LOAD past the alarm is left as before (not compared).
+    #[inline(always)]
+    fn reached_one_shot(&self) -> bool {
+        self.fires_when_reached && self.config & ((1 << 31) | (1 << 10) | (1 << 29)) == (1 << 31) | (1 << 10)
+            && if self.config & (1 << 30) != 0 { self.count >= self.alarm } else { self.count <= self.alarm }
+    }
     /// Counter steps to an armed alarm that counting will reach, and the prescaler divider.
     #[inline(always)]
     pub fn alarm_gap(&self) -> Option<(u64, u64)> {
@@ -63,8 +78,8 @@ impl Timer {
         let div = ((self.config >> 13) & 0xffff) as u64;
         let div = if div == 0 { 65536 } else { div };
         let steps = if self.config & (1 << 30) != 0 {
-            if self.count >= self.alarm { return None } else { self.alarm - self.count }
-        } else if self.count <= self.alarm { return None } else { self.count - self.alarm };
+            if self.count >= self.alarm { if self.reached_one_shot() { 0 } else { return None } } else { self.alarm - self.count }
+        } else if self.count <= self.alarm { if self.reached_one_shot() { 0 } else { return None } } else { self.count - self.alarm };
         Some((steps, div))
     }
     /// APB ticks to the alarm, saturating: 64-bit counters (classic ESP32) can be further away
@@ -74,7 +89,10 @@ impl Timer {
     }
 }
 impl TimerGroup {
-    pub fn new() -> Self { TimerGroup { ram: RegRam::new(), t: [Timer::default(); 2], int_raw: 0, int_ena: 0 } }
+    pub fn new() -> Self {
+        let t = Timer { fires_when_reached: true, ..Timer::default() };
+        TimerGroup { ram: RegRam::new(), t: [t; 2], int_raw: 0, int_ena: 0 }
+    }
     pub fn tick(&mut self, apb_ticks: u64) {
         for i in 0..2 {
             self.t[i].step(apb_ticks, (1 << 54) - 1, || self.int_raw |= 1 << i);
