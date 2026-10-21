@@ -36,11 +36,14 @@ pub struct UartLayout {
     pub autobaud_regs: u32,
     /// UART core clock the ROM runs the detector on when it is not in CLK_CONF (0x78), as on the C6 (PCR); 0 = CLK_CONF.
     pub autobaud_clock_hz: u32,
+    /// ID (0x80) bit 31 is REG_UPDATE (UART_UPDATE on the C3): set by the driver, cleared by the
+    /// hardware once the configuration is synced. The C6 moved it to its own register (0x98).
+    pub id_reg_update: bool,
 }
 impl UartLayout {
-    pub const S3: UartLayout = UartLayout { thrhd_mask: 0x3ff, rxfifo_rst: 1 << 17, rxfifo_cnt_mask: 0x3ff, autobaud_en: 1 << 27, autobaud_regs: 0x28, autobaud_clock_hz: 0 };
-    pub const C3: UartLayout = UartLayout { thrhd_mask: 0x1ff, rxfifo_rst: 1 << 17, rxfifo_cnt_mask: 0x3ff, autobaud_en: 1 << 27, autobaud_regs: 0x28, autobaud_clock_hz: 0 };
-    pub const C6: UartLayout = UartLayout { thrhd_mask: 0xff, rxfifo_rst: 1 << 22, rxfifo_cnt_mask: 0xff, autobaud_en: 1 << 19, autobaud_regs: 0x7c, autobaud_clock_hz: 40_000_000 };
+    pub const S3: UartLayout = UartLayout { thrhd_mask: 0x3ff, rxfifo_rst: 1 << 17, rxfifo_cnt_mask: 0x3ff, autobaud_en: 1 << 27, autobaud_regs: 0x28, autobaud_clock_hz: 0, id_reg_update: true };
+    pub const C3: UartLayout = UartLayout { thrhd_mask: 0x1ff, rxfifo_rst: 1 << 17, rxfifo_cnt_mask: 0x3ff, autobaud_en: 1 << 27, autobaud_regs: 0x28, autobaud_clock_hz: 0, id_reg_update: true };
+    pub const C6: UartLayout = UartLayout { thrhd_mask: 0xff, rxfifo_rst: 1 << 22, rxfifo_cnt_mask: 0xff, autobaud_en: 1 << 19, autobaud_regs: 0x7c, autobaud_clock_hz: 40_000_000, id_reg_update: false };
 }
 
 // ------------------------------------------------------------------ UART
@@ -177,6 +180,9 @@ impl Uart {
             0x8 => self.int_raw & self.int_ena,
             0xc => self.int_ena,
             0x1c => 0xe000_c000 | (self.rx.len() as u32 & self.layout.rxfifo_cnt_mask),   // STATUS: rxfifo_cnt, tx count 0, TXD/RTSN/DSRN idle levels as on silicon
+            // ID.REG_UPDATE (R/W/SC): reads as synced at once. esp-hal 1.2 spins on it after each config
+            // write. components/soc/{esp32s3,esp32c3}/register/soc/uart_reg.h, IDF v5.5.4
+            0x80 if self.layout.id_reg_update => self.ram.read(off) & !(1 << 31),
             0x98 => 0,                              // REG_UPDATE (C6 and later): the driver sets it and spins until hardware clears it
             _ => self.ram.read(off),
         }
@@ -248,6 +254,18 @@ impl EnaLatency {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn id_reg_update_reads_synced_on_s3_and_c3_only() {
+        for layout in [UartLayout::S3, UartLayout::C3] {
+            let mut u = Uart::new(layout);
+            u.write(0x80, (1 << 31) | (1 << 30) | 0x500);
+            assert_eq!(u.read(0x80), (1 << 30) | 0x500, "REG_UPDATE cleared, the rest kept");
+        }
+        let mut u = Uart::new(UartLayout::C6);
+        u.write(0x80, 1 << 31);   // HIGHPULSE on the C6: a plain register
+        assert_eq!(u.read(0x80), 1 << 31);
+    }
+
     #[test]
     fn classic_baud_uses_its_divider_and_clock_source() {
         let mut u = Uart::new(UartLayout::S3);
