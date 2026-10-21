@@ -627,15 +627,13 @@ fn narrow_mmio_writes_are_rejected_without_device_or_time_side_effects() {
     bus.periph.usb.int_ena = 0x1122_3344;
     assert_eq!(Bus::tick(&mut bus, 37), 0);
     bus.periph.misc.mmio_log = Some(Vec::new());
-    for lane in 0..4 {
+    for lane in 1..4 {
         assert_eq!(bus.write8(USB + lane, 0x55), Err(Fault::Prohibited));
         assert_eq!(bus.write8(USB + 0x14 + lane, 0xff), Err(Fault::Prohibited));
         assert_eq!(bus.write8(USB + 0x10 + lane, 0xff), Err(Fault::Prohibited));
     }
-    for lane in [0, 2] {
-        assert_eq!(bus.write16(USB + lane, 0x5566), Err(Fault::Prohibited));
-        assert_eq!(bus.write16(USB + 0x14 + lane, 0xffff), Err(Fault::Prohibited));
-    }
+    assert_eq!(bus.write16(USB + 2, 0x5566), Err(Fault::Prohibited));
+    assert_eq!(bus.write16(USB + 0x14 + 2, 0xffff), Err(Fault::Prohibited));
     assert_eq!(bus.last_fault, Some((USB + 0x16, true)));
     assert_eq!(bus.tick_pending, 37);
     assert!(!bus.irq_dirty);
@@ -663,9 +661,11 @@ fn unsupported_mmio_reads_do_not_pop_fifos_or_advance_time() {
     assert_eq!(Bus::tick(&mut bus, 37), 0);
     bus.periph.misc.mmio_log = Some(Vec::new());
     for lane in 0..4 {
+        assert_eq!(bus.read8(MMU_TABLE + lane), Err(Fault::Prohibited));
+    }
+    for lane in 1..4 {
         assert_eq!(bus.read8(USB + lane), Err(Fault::Prohibited));
         assert_eq!(bus.read16(USB + lane), Err(Fault::Prohibited));
-        assert_eq!(bus.read8(MMU_TABLE + lane), Err(Fault::Prohibited));
     }
     for lane in 1..4 {
         assert_eq!(bus.read32(MMU_TABLE + lane), Err(Fault::Misaligned));
@@ -679,6 +679,26 @@ fn unsupported_mmio_reads_do_not_pop_fifos_or_advance_time() {
     assert_eq!(bus.read32(USB), Ok(0x11));
     assert_eq!(bus.periph.usb.rx.iter().copied().collect::<Vec<_>>(), [0x22]);
     assert_eq!(bus.tick_pending, 0);
+}
+
+#[test]
+fn narrow_mmio_at_a_register_address_is_a_word_access() {
+    const USB: u32 = 0x6003_8000;
+    let mut bus = SocBus::new(1024, 1024, [0; 6]);
+    bus.periph.usb.host_input(&[0x11, 0x22]);
+    bus.write32(USB + 0x10, 0xabcd).unwrap();
+    // zero-extended: the bits above the access are cleared, as a word write of the value
+    bus.write8(USB + 0x10, 0x34).unwrap();
+    assert_eq!(bus.periph.usb.int_ena, 0x34);
+    bus.write16(USB + 0x10, 0x1234).unwrap();
+    assert_eq!(bus.periph.usb.int_ena, 0x1234);
+    assert_eq!(bus.read8(USB + 0x10), Ok(0x34));
+    assert_eq!(bus.read16(USB + 0x10), Ok(0x1234));
+    // a narrow read is the register's read, side effects included
+    assert_eq!(bus.read8(USB), Ok(0x11));
+    assert_eq!(bus.periph.usb.rx.iter().copied().collect::<Vec<_>>(), [0x22]);
+    bus.write8(USB, 0x55).unwrap();
+    assert_eq!(bus.periph.usb.tx_fifo, [0x55]);
 }
 
 #[test]

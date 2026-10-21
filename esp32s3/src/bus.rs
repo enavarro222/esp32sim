@@ -657,13 +657,23 @@ impl CacheResource {
 
 impl SocBus {
     // Const specialization keeps origin checks and CPU pricing out of DMA/host accessors.
+    /// An 8/16-bit access at a register's own address is a word access to it (truncated read,
+    /// zero-extended write). svd2rust PACs emit them for the registers the SVD declares 8 bits wide
+    /// (esp32s3 0.36: NRXPD_CTRL, FE GEN_CTRL, I2C COMD, PCNT CONF0, LCD_DATA_DOUT_MODE), and
+    /// esp-hal 1.2 `init` reads and writes NRXPD_CTRL that way on silicon. Other byte lanes and the
+    /// MMU table stay rejected.
+    fn narrow_mmio(addr: u32) -> bool {
+        addr & 3 == 0 && !(MMU_TABLE..MMU_TABLE + (MMU_ENTRIES as u32) * 4).contains(&addr)
+    }
     fn read8_access<const CPU: bool>(&mut self, addr: u32) -> Result<u8, Fault> {
+        if Self::is_periph(addr) && Self::narrow_mmio(addr) { return Ok(self.periph_read(addr) as u8); }
         if Self::is_periph(addr) { self.last_fault = Some((addr, false)); return Err(Fault::Prohibited); }
         let Some(e) = self.lookup(addr) else { self.last_fault = Some((addr, false)); return Err(Fault::Unmapped) };
         if CPU { self.price_cached_data(e, addr, 1, false); }
         Ok(self.buf(e.src as u8)[e.off as usize + (addr - e.lo) as usize])
     }
     fn read16_access<const CPU: bool>(&mut self, addr: u32) -> Result<u16, Fault> {
+        if Self::is_periph(addr) && Self::narrow_mmio(addr) { return Ok(self.periph_read(addr) as u16); }
         if Self::is_periph(addr) { self.last_fault = Some((addr, false)); return Err(Fault::Prohibited); }
         match self.lookup(addr) {
             Some(e) if e.hi - addr >= 2 => { if CPU { self.price_cached_data(e, addr, 2, false); } let o = e.off as usize + (addr - e.lo) as usize; Ok(u16::from_le_bytes(self.buf(e.src as u8)[o..o + 2].try_into().unwrap())) }
@@ -683,9 +693,11 @@ impl SocBus {
         }
     }
     fn write8_access<const CPU: bool>(&mut self, addr: u32, v: u8) -> Result<(), Fault> {
-        // S3 register writes are modelled only as aligned words (TRM §15.6.6).
-        // Reject unsupported widths before reading a device or advancing its time.
+        // S3 register writes are modelled only as aligned words (TRM §15.6.6), plus the narrow
+        // accesses at a register's own address (`narrow_mmio`).
+        // Reject other widths before reading a device or advancing its time.
         // This is an explicit emulator policy, not a model of optional PMS IRQs.
+        if Self::is_periph(addr) && Self::narrow_mmio(addr) { self.periph_write(addr, u32::from(v)); return Ok(()); }
         if Self::is_periph(addr) { self.last_fault = Some((addr, true)); return Err(Fault::Prohibited); }
         match self.lookup(addr) {
             Some(e) if e.writable != 0 => { if CPU { self.price_cached_data(e, addr, 1, true); } let rel = (addr - e.lo) as usize; self.buf_mut(e.src as u8)[e.off as usize + rel] = v; if e.code != 0 { self.bump(e.vbase, rel, 1); } Ok(()) }
@@ -693,6 +705,7 @@ impl SocBus {
         }
     }
     fn write16_access<const CPU: bool>(&mut self, addr: u32, v: u16) -> Result<(), Fault> {
+        if Self::is_periph(addr) && Self::narrow_mmio(addr) { self.periph_write(addr, u32::from(v)); return Ok(()); }
         if Self::is_periph(addr) { self.last_fault = Some((addr, true)); return Err(Fault::Prohibited); }
         match self.lookup(addr) {
             Some(e) if e.writable != 0 && e.hi - addr >= 2 => { if CPU { self.price_cached_data(e, addr, 2, true); } let rel = (addr - e.lo) as usize; let o = e.off as usize + rel; self.buf_mut(e.src as u8)[o..o + 2].copy_from_slice(&v.to_le_bytes()); if e.code != 0 { self.bump(e.vbase, rel, 2); } Ok(()) }
