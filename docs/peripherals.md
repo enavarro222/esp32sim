@@ -26,7 +26,7 @@ ESP32-S3 peripheral MMIO reads and writes must be aligned 32-bit accesses. Byte 
 | RMT | 0x60016000 | partial | TX channels: symbol RAM, clock divider, end marker, done interrupt; RX — |
 | BLE core | 0x60031000 | stub | what the ROM BLE controller and IDF's controller library check, inferred from the ROM (no public register map): the self-clearing reset bit (+0x00 bit 31), the version 0x0900_1B00 (+0x04), the clock sample (+0x1C bit 31, half-slots in +0x1C, half-µs left in +0x20) from the emulated time; plain registers otherwise, no radio, no interrupts ([model](../esp32s3/src/periph.rs)) |
 | BT sleep control | 0x60042000 | stub | +0x00 only: a low-power request (bit 31) is acknowledged at once (bit 15) |
-| LCD_CAM | 0x60041000 | partial | camera engine (start/reset, VSYNC, frame pump from GDMA RX) and the LCD RGB/DPI engine (timing/clock registers, frame pump into GDMA TX, LCD_VSYNC); i8080 LCD mode — |
+| LCD_CAM | 0x60041000 | partial | camera engine (start/reset, VSYNC, frame pump from GDMA RX) and the LCD RGB/DPI engine (timing/clock registers, frame pump into GDMA TX, LCD_VSYNC); i8080 LCD mode: one transfer per LCD_START (command, then the GDMA TX data) handed to the board at once, LCD_TRANS_DONE (no wire timing, dummy or 2-cycle command) |
 | SHA | 0x6003B000 | full | SHA-1/224/256/384/512, block and GDMA modes (bootloader image verification, TLS certificate digests) |
 | AES | 0x6003A000 | partial | block and DMA modes, ECB/CBC/CTR/OFB, all key lengths (mbedTLS, WPA2 group-key unwrap); hardware GCM — |
 | RSA/MPI | 0x6003C000 | full | large-number multiply, modular multiply and modular exponentiation up to 4096 bits, polled or interrupt-driven (every mbedTLS public-key operation) |
