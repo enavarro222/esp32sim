@@ -285,6 +285,18 @@ be in DRAM or, with `--psram-mb 4`, PSRAM.
 JPEG encoding, adjustable FPS and silicon/PCLK timing are unsupported.
 See [the fixture and scope](esp32.md#the-camera---board-ai-thinker-cam).
 
+## `cc600` — GEOID CC600 bike computer
+
+| Device | Bus | Model |
+| --- | --- | --- |
+| ST7789 240×320 panel | LCD_CAM i8080 16-bit (CS 2, DC 40, WR 3, D0–D15 on 4 38 5 37 6 36 7 35 8 34 9 33 10 47 11 48) | `DcsPanel`: 8-bit parameters, 16-bit pixels, one transfer per LCD_START |
+| Backlight LEDC on GPIO 45 | LEDC | unmodelled, harmless |
+| nRF52 (keys, RTC, battery, barometer) | UART | unmodelled |
+
+Runs the open firmware ([opencc600](https://github.com/enavarro222/opencc600), esp-hal 1.2 + Embassy)
+to its home screen from a whole flash image (`--flash-image`, `--flash-mb 16 --psram-mb 8`). Its BLE
+controller is not modelled: `--stub btdm_controller_init=0 --stub btdm_controller_enable=0`.
+
 ## `none` — bare module
 
 No devices; console only. For stock ESP-IDF projects (`examples/hello_world`).
