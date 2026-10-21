@@ -4,6 +4,7 @@
 //! WS2812 chains, bit-banged SPI) live in `esp_soc::devices`.
 //!
 //! - `Atech14` — the Atech 14-port motherboard with the Knob, Light Grid and TFT modules
+//! - `Cc600` — GEOID CC600 bike computer (ST7789 on the LCD_CAM i8080 bus)
 //! - `WaveshareCam` — ESP32-S3-CAM-OV5640
 //! - `WaveshareLcd4b` — ESP32-S3-Touch-LCD-4B
 //! - `WaveshareAmoled18V2` — ESP32-S3-Touch-AMOLED-1.8 V2
@@ -12,12 +13,14 @@
 pub use esp_soc::board::{Board, BoardEdge, BoardModel, NoBoard, VirtualCycle};
 
 pub mod atech14;
+pub mod cc600;
 pub mod stopwatch;
 pub mod waveshare_amoled18;
 pub mod waveshare_cam;
 pub mod waveshare_lcd4b;
 
 pub use atech14::*;
+pub use cc600::*;
 pub use stopwatch::*;
 pub use waveshare_amoled18::*;
 pub use waveshare_cam::*;
@@ -27,6 +30,7 @@ pub use waveshare_lcd4b::*;
 pub fn make_board(name: &str) -> Option<Board> {
     match name {
         "atech14" | "atech" => Some(Box::new(Atech14::new())),
+        "cc600" => Some(Box::new(Cc600::new())),
         "none" | "bare" => Some(Box::new(NoBoard)),
         "stopwatch" | "m5stack-stopwatch" => Some(Box::new(StopWatch::new())),
         "waveshare-cam" | "waveshare" => Some(Box::new(WaveshareCam::new())),
