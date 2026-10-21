@@ -732,6 +732,7 @@ impl Peripherals {
             thrhd_mask: 0x7f,
             rxfifo_rst: 1 << 17,
             rxfifo_cnt_mask: 0xff,
+            id_reg_update: false,
         };
         let mut gpio = ClassicGpio::new();
         gpio.gpio.strap = 0x13; // normal SPI-fast-flash boot, with ROM messages enabled
