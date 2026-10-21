@@ -28,6 +28,7 @@ impl Soc for Esp32 {
     fn new_core(i: usize) -> Cpu {
         let mut c = Cpu::new(if i == 0 { 0xcdcd } else { 0xabab });
         c.lx6 = true;
+        c.cpenable = 0;
         c.configid = [0xC2BC_FFFE, 0x1CC5_FE96];
         c
     }
