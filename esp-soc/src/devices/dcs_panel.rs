@@ -78,6 +78,13 @@ impl DcsPanel {
         }
     }
 
+    /// One word of a 16-bit parallel (i8080) data phase, D/C high: a whole RGB565 pixel after
+    /// RAMWR, the low byte (D0..D7) of a parameter otherwise.
+    pub fn word(&mut self, w: u16) {
+        self.dc = true;
+        if self.cmd == 0x2c { self.pixel_hi = None; self.write_pixel(w); } else { self.byte(w as u8); }
+    }
+
     fn write_pixel(&mut self, px: u16) {
         // address counters in the controller's frame; MADCTL MV swaps which counter is "column",
         // MX / MY mirror
@@ -109,6 +116,15 @@ impl DcsPanel {
 mod tests {
     use super::*;
     fn cmd(p: &mut DcsPanel, c: u8, params: &[u8]) { p.dc = false; p.byte(c); p.dc = true; for &b in params { p.byte(b); } }
+
+    #[test]
+    fn a_16_bit_bus_word_is_a_pixel_after_ramwr_and_a_parameter_byte_before() {
+        let mut p = DcsPanel::st7789();
+        p.dc = false; p.byte(0x2a); for b in [0, 1, 0, 2] { p.word(b); }
+        p.dc = false; p.byte(0x2b); for b in [0, 3, 0, 3] { p.word(b); }
+        p.dc = false; p.byte(0x2c); p.word(0xf800); p.word(0x07e0);
+        assert_eq!((p.gram[3 * 240 + 1], p.gram[3 * 240 + 2]), (0xf800, 0x07e0));
+    }
 
     #[test]
     fn a_window_fills_x_fastest_and_wraps() {

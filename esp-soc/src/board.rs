@@ -71,6 +71,9 @@ pub trait BoardModel {
     fn camera_preview(&self, _w: u32, _h: u32) -> Option<Vec<u8>> { None }
     /// A complete frame from the LCD_CAM RGB interface (RGB565 little-endian, `w`x`h`).
     fn lcd_frame(&mut self, _w: u32, _h: u32, _rgb565: &[u8]) {}
+    /// One LCD_CAM i8080 transfer: the command phase, if any, then the data bytes as the GDMA
+    /// fetched them. `wide`: a 16-bit bus, each little-endian byte pair one bus word.
+    fn lcd_i80(&mut self, _cmd: Option<u32>, _data: &[u8], _wide: bool) {}
     /// The board's display for the UI/PNG: (width, height, RGB565 pixels, change counter).
     fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> { None }
     /// Completed display frames (for the UI's statistics line).

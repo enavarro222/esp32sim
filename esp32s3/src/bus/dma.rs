@@ -683,6 +683,46 @@ impl SocBus {
         }
     }
 
+    /// LCD i8080 mode: one transfer per LCD_START, run at once. The command phase (LCD_CMD, value
+    /// in LCD_CMD_VAL) and the data phase (LCD_DOUT, the GDMA out-channel on trigger 5 drained to
+    /// its last descriptor) go to the board; LCD_START clears and LCD_TRANS_DONE rises. Wire
+    /// timing, dummy cycles, the 2-cycle command and LCD_DOUT_CYCLELEN without DMA are not modelled.
+    /// Bits from components/soc/esp32s3/register/soc/lcd_cam_reg.h, IDF v5.5.4: LCD_USER (0x14)
+    /// LCD_2BYTE_EN 23, LCD_DOUT 24, LCD_CMD 26, LCD_START 27; LCD_CMD_VAL 0x28;
+    /// LC_DMA_INT_RAW (0x68) LCD_TRANS_DONE 1.
+    pub(super) fn dma_i80_step(&mut self) {
+        if !self.periph.lcd_cam.i80_pending { return; }
+        self.periph.lcd_cam.i80_pending = false;
+        let user = self.periph.lcd_cam.lcd_user;
+        let mut data = Vec::new();
+        if user & (1 << 24) != 0 {
+            if let Some(ch) = self.periph.gdma.out_channel_for(5) {
+                let mut walk = DescriptorWalk::new(GDMA_DESCRIPTOR_STEP_BUDGET);
+                loop {
+                    let c = self.periph.gdma.out[ch];
+                    if !c.running || c.desc == 0 { break; }
+                    let Ok((_, d)) = walk.read(self, c.desc) else { self.fail_dma_out(ch); break };
+                    let (length, eof, buf, next) = (d.length, d.eof, d.buf, d.next);
+                    let remaining = length.saturating_sub(c.buf_pos) as usize;
+                    if remaining > 0 && self.append_mapped_bytes(buf.wrapping_add(c.buf_pos), remaining, &mut data).is_err() {
+                        self.fail_dma_out(ch); break;
+                    }
+                    let ch_ref = &mut self.periph.gdma.out[ch];
+                    ch_ref.int_raw |= 1 << 0;
+                    if eof { ch_ref.int_raw |= 1 << 1; ch_ref.eof_desc = c.desc; }
+                    if next == 0 { ch_ref.running = false; ch_ref.desc = 0; ch_ref.int_raw |= 1 << 3; break; }
+                    ch_ref.desc = next; ch_ref.buf_pos = 0;
+                }
+            }
+        }
+        let cmd = (user & (1 << 26) != 0).then(|| self.periph.lcd_cam.ram.read(0x28));
+        if self.periph.lcd_cam.lcd_log { eprintln!("[lcd] i8080 cmd {:x?} + {} bytes ({}-bit)", cmd, data.len(), if user & (1 << 23) != 0 { 16 } else { 8 }); }
+        self.board.lcd_i80(cmd, &data, user & (1 << 23) != 0);
+        self.periph.lcd_cam.lcd_user &= !(1 << 27);
+        self.periph.lcd_cam.int_raw |= 1 << 1;                                       // LCD_TRANS_DONE_INT
+        self.irq_dirty = true;
+    }
+
     fn scatter_dma_in(&mut self, ch: usize, data: &[u8], eof_bytes: Option<u32>, finish: bool) -> Result<(), ()> {
         let mut channel = self.periph.gdma.inp[ch];
         let mut irq_changed = false;

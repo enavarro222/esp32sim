@@ -603,3 +603,30 @@ fn crypto_descriptor_writeback_preserves_mmio_side_effects() {
     assert!(!bus.periph.gdma.out[0].running);
     assert_eq!(bus.periph.gdma.out[0].desc, 0);
 }
+
+#[test]
+fn lcd_i8080_transfer_runs_at_lcd_start_and_reaches_the_board() {
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<(Option<u32>, Vec<u8>, bool)>>>;
+    struct Probe(Seen);
+    impl crate::board::BoardModel for Probe {
+        fn name(&self) -> &'static str { "probe" }
+        fn lcd_i80(&mut self, cmd: Option<u32>, data: &[u8], wide: bool) { self.0.lock().unwrap().push((cmd, data.to_vec(), wide)); }
+    }
+    let seen = Seen::default();
+    let mut bus = bus_with_out(5, 4, 0);
+    bus.board = Box::new(Probe(seen.clone()));
+    bus.write32(INPUT, 0x07e0_f800).unwrap();
+    bus.periph.lcd_cam.write(0x28, 0x2c);                                     // LCD_CMD_VAL: RAMWR
+    bus.periph.lcd_cam.write(0x14, (1 << 27) | (1 << 26) | (1 << 24) | (1 << 23));
+    assert_eq!(bus.periph.lcd_cam.read(0x14) & (1 << 27), 1 << 27, "running until the step");
+    bus.dma_i80_step();
+    assert_eq!(*seen.lock().unwrap(), [(Some(0x2c), vec![0x00, 0xf8, 0xe0, 0x07], true)]);
+    assert_eq!(bus.periph.lcd_cam.read(0x14) & (1 << 27), 0, "LCD_START cleared");
+    assert_eq!(bus.periph.lcd_cam.read(0x68) & 2, 2, "LCD_TRANS_DONE");
+    assert!(!bus.periph.gdma.out[0].running);
+    // RGB mode keeps its own engine: no i8080 transfer
+    bus.periph.lcd_cam.write(0x1c, 1 << 31);
+    bus.periph.lcd_cam.write(0x14, 1 << 27);
+    bus.dma_i80_step();
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}

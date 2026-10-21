@@ -824,7 +824,7 @@ impl SocBus {
     fn cadence_active(&self) -> bool {
         let p = &self.periph;
         p.i2s0.active() || p.i2s1.active()
-            || p.lcd_cam.cam_active() || p.lcd_cam.lcd_running()
+            || p.lcd_cam.cam_active() || p.lcd_cam.lcd_running() || p.lcd_cam.i80_pending
             // EX157: a running GDMA IN channel is passive. Its only producers are the camera
             // (capture or VSYNC enabled), AES (dma_pending) and mem-to-mem (needs the OUT side running),
             // all listed here, so an armed-but-idle receive channel does not hold the cadence.
@@ -890,6 +890,7 @@ impl SocBus {
         self.dma_i2s_step(cycles as u64);
         self.dma_cam_step(cycles as u64);
         self.dma_lcd_step(cycles as u64);
+        self.dma_i80_step();
         self.dma_m2m_step();
         if !self.periph.wifi.tx_pending.is_empty() { self.wifi_tx_step(); }
         if self.periph.aes.dma_pending { self.aes_dma_step(); }
