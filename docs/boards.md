@@ -215,6 +215,18 @@ The energy-scan firmware and the run recipe: `examples/waveshare-c6-lcd147/`, [e
 
 Selected with `--chip esp32 --board ttgo-tdisplay` (alias `tdisplay`); [esp32.md](esp32.md#the-board---board-ttgo-tdisplay).
 
+## `cc600` — GEOID CC600 bike computer
+
+| Device | Bus | Model |
+| --- | --- | --- |
+| ST7789 240×320 panel | LCD_CAM i8080 16-bit (CS 2, DC 40, WR 3, D0–D15 on 4 38 5 37 6 36 7 35 8 34 9 33 10 47 11 48) | `DcsPanel`: 8-bit parameters, 16-bit pixels, one transfer per LCD_START |
+| Backlight LEDC on GPIO 45 | LEDC | unmodelled, harmless |
+| nRF52 (keys, RTC, battery, barometer) | UART | unmodelled |
+
+Runs the open firmware ([opencc600](https://github.com/enavarro222/opencc600), esp-hal 1.2 + Embassy)
+to its home screen from a whole flash image (`--flash-image`, `--flash-mb 16 --psram-mb 8`). Its BLE
+controller is not modelled: `--stub btdm_controller_init=0 --stub btdm_controller_enable=0`.
+
 ## `none` — bare module
 
 No devices; console only. For stock ESP-IDF projects (`examples/hello_world`).
