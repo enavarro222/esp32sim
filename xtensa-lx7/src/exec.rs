@@ -195,6 +195,18 @@ mod tests {
     use super::Cpu;
 
     #[test]
+    fn coprocessors_are_enabled_from_reset_on_lx7_only() {
+        let mut cpu = Cpu::new(0);
+        assert_eq!(cpu.cpenable, 0xff);
+        cpu.cpenable = 0;
+        cpu.reset();
+        assert_eq!(cpu.cpenable, 0xff);
+        cpu.lx6 = true;
+        cpu.reset();
+        assert_eq!(cpu.cpenable, 0);
+    }
+
+    #[test]
     fn lx6_dfp_context_registers_round_trip() {
         let mut cpu = Cpu { lx6: true, ..Cpu::default() };
         for (register, value) in (234..=236).zip([0x1234, 0x5678, 0x9abc]) {
