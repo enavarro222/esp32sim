@@ -28,7 +28,7 @@ fn systimer_one_shot_fires_on_its_tick_and_says_when() {
 #[test]
 fn systimer_periodic_repeats() {
     let mut s = Systimer::new();
-    Device::write(&mut s, 0x0, (1 << 30) | (1 << 25));      // unit 0, comparator 1
+    Device::write(&mut s, 0x0, (1 << 30) | (1 << 23));      // unit 0, comparator 1 (TARGET1_WORK_EN)
     Device::write(&mut s, 0x38, (1 << 30) | 50);             // periodic, 50 ticks
     Device::write(&mut s, 0x54, 1);                          // COMP1_LOAD
     Device::write(&mut s, 0x64, 2);
@@ -36,6 +36,19 @@ fn systimer_periodic_repeats() {
     Device::tick(&mut s, 1); assert_eq!(Device::irq_sources(&s), 2);
     Device::write(&mut s, 0x6c, 2);
     Device::tick(&mut s, 50); assert_eq!(Device::irq_sources(&s), 2, "and again a period later");
+}
+
+#[test]
+fn systimer_unit0_counts_from_reset_and_stall_bits_enable_no_comparator() {
+    let mut s = Systimer::new();
+    assert_eq!(Device::read(&mut s, 0x0), 0x4600_0000, "SYSTIMER_CONF reset value");
+    Device::write(&mut s, 0x38, (1 << 30) | 50);             // comparator 1 periodic, never enabled
+    Device::write(&mut s, 0x54, 1);
+    Device::write(&mut s, 0x64, 2);
+    Device::tick(&mut s, 100);
+    Device::write(&mut s, 0x4, 1 << 30);                     // UNIT0_OP update
+    assert_eq!(Device::read(&mut s, 0x44), 100, "unit 0 counted without a CONF write");
+    assert_eq!(Device::irq_sources(&s), 0, "bit 25 is UNIT1_CORE1_STALL_EN, not TARGET1_WORK_EN");
 }
 
 // ------------------------------------------------------------------ timer group

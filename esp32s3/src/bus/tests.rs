@@ -894,7 +894,7 @@ fn read_flush_reports_timer_and_rmt_threshold_sources() {
         let mut bus = SocBus::new(1024, 1024, [0; 6]);
         if timer < 3 {
             let st = &mut bus.periph.systimer;
-            st.conf = (1 << 30) | (1 << (24 + timer));
+            st.conf = (1 << 30) | (1 << (24 - timer));
             st.armed[timer] = true;
             st.target[timer] = 1;
             st.int_ena = 1 << timer;

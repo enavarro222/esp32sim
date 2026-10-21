@@ -14,13 +14,19 @@ pub struct Systimer {
     ticks_acc: u64,
 }
 impl Systimer {
-    pub fn new() -> Self { Systimer { conf: 0, unit: [0; 2], unit_latch: [0; 2], load: [0; 2], target: [0; 3], target_conf: [0; 3], period_start: [0; 3], int_ena: 0, int_raw: 0, ticks_acc: 0, armed: [false; 3] } }
+    /// SYSTIMER_CONF reset value: TIMER_UNIT0_WORK_EN (bit 30), TIMER_UNIT1_CORE0/CORE1_STALL_EN (bits 26, 25).
+    /// components/soc/{esp32s3,esp32c3,esp32c6}/register/soc/systimer_reg.h, IDF v5.5.4. Unit 0 counts
+    /// from reset: esp-hal 1.2 reads it for `Instant::now` without ever writing CONF.
+    pub const CONF_RESET: u32 = 0x4600_0000;
+    /// SYSTIMER_TARGETn_WORK_EN: target 0 at bit 24, 1 at bit 23, 2 at bit 22 (same headers).
+    fn target_work_en(t: usize) -> u32 { 1 << (24 - t as u32) }
+    pub fn new() -> Self { Systimer { conf: Self::CONF_RESET, unit: [0; 2], unit_latch: [0; 2], load: [0; 2], target: [0; 3], target_conf: [0; 3], period_start: [0; 3], int_ena: 0, int_raw: 0, ticks_acc: 0, armed: [false; 3] } }
     pub fn tick(&mut self, ticks: u64) {
         for u in 0..2 {
             if self.conf & (1 << (30 - u as u32)) != 0 { self.unit[u] = (self.unit[u] + ticks) & ((1u64 << 52) - 1); }
         }
         for t in 0..3 {
-            if self.conf & (1 << (24 + t as u32)) == 0 { continue; }
+            if self.conf & (Self::target_work_en(t)) == 0 { continue; }
             let unit = ((self.target_conf[t] >> 31) & 1) as usize;
             let now = self.unit[unit];
             if self.target_conf[t] & (1 << 30) != 0 {
@@ -90,7 +96,7 @@ impl Device for Systimer {
     fn next_deadline(&self) -> Option<u64> {
         let mut best: Option<u64> = None;
         for t in 0..3 {
-            if self.conf & (1 << (24 + t as u32)) == 0 { continue; }
+            if self.conf & (Self::target_work_en(t)) == 0 { continue; }
             let unit = ((self.target_conf[t] >> 31) & 1) as usize;
             if self.conf & (1 << (30 - unit as u32)) == 0 { continue; }              // unit stopped: never fires
             let now = self.unit[unit];
