@@ -428,6 +428,54 @@ impl Device for FeIq {
     fn write(&mut self, _off: u32, v: u32) -> WriteEffect { self.word = v; WriteEffect::NONE }
 }
 
+/// The Bluetooth LE core (block 0x60031000), as far as the ROM controller and the IDF controller
+/// library check it, inferred from the S3 ROM and an IDF 5 application (no public register map);
+/// the other registers are plain RAM.
+/// - +0x00, control: bit 31 resets the core, the controller spins until it reads back clear; the
+///   reset is done at once.
+/// - +0x04, version: `lld.c` asserts 0x0900_1B00 at controller init.
+/// - +0x1c / +0x20, clock sample (`r_rwip_time_get`): writing bit 31 of +0x1c asks for a sample and
+///   the controller spins until the bit reads back clear, then reads +0x1c[27:0], the half-slots
+///   (312.5 µs) since the clock started, and +0x20, the half-µs left in that half-slot (624 down to
+///   0). The sample is ready at once; the clock runs from reset.
+pub struct BleCore { pub ram: RegRam, pub now_cycles: u64, sample: u64 }
+impl BleCore {
+    const RESET: u32 = 1 << 31;
+    const VERSION: u32 = 0x0900_1b00;
+    const SAMPLE: u32 = 1 << 31;
+    /// CPU cycles per half-µs and per half-slot of 625 half-µs.
+    const HALF_US: u64 = CPU_HZ / 2_000_000;
+    const HALF_SLOT: u64 = 625 * Self::HALF_US;
+    pub fn new() -> Self { BleCore { ram: RegRam::new(), now_cycles: 0, sample: 0 } }
+}
+impl Default for BleCore { fn default() -> Self { Self::new() } }
+impl Device for BleCore {
+    fn read(&mut self, off: u32) -> u32 {
+        match off {
+            0x00 => self.ram.read(off) & !Self::RESET,
+            0x04 => Self::VERSION,
+            0x1c => (self.ram.read(off) & 0x7000_0000) | (self.sample / Self::HALF_SLOT) as u32 & 0x0fff_ffff,
+            0x20 => 624 - (self.sample % Self::HALF_SLOT / Self::HALF_US) as u32,
+            _ => self.ram.read(off),
+        }
+    }
+    fn write(&mut self, off: u32, v: u32) -> WriteEffect {
+        if off == 0x1c && v & Self::SAMPLE != 0 { self.sample = self.now_cycles; }
+        self.ram.write(off, v);
+        WriteEffect::NONE
+    }
+}
+
+/// The Bluetooth controller's sleep control (0x60042000), inferred like [`BleCore`]: the ROM's
+/// `r_rwip_sleep` sets bit 31 to request the low-power state and `r_rwip_wakeup` clears it; the IDF
+/// controller library then spins until bit 15 reads 1, the request taken. The request is taken
+/// at once: bit 15 follows bit 31.
+pub struct BtSleep { word: u32 }
+impl Device for BtSleep {
+    fn read(&mut self, _off: u32) -> u32 { self.word & !(1 << 15) | (self.word >> 31) << 15 }
+    fn write(&mut self, _off: u32, v: u32) -> WriteEffect { self.word = v; WriteEffect::NONE }
+}
+
 // ------------------------------------------------------------------ all together
 pub struct Peripherals {
     pub usb: UsbSerialJtag,
@@ -452,6 +500,8 @@ pub struct Peripherals {
     pub pcnt: Pcnt,
     pub wifi: WifiMac,
     pub fe: FeIq,
+    pub ble: BleCore,
+    pub bt_sleep: BtSleep,
     pub aes: Aes,
     pub rsa: Rsa,
     pub sha: Sha,
@@ -520,6 +570,8 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Systimer, 15), 
     0x3a "AES" (aes) => [SRC_AES];
     0x3c "RSA" (rsa) => [SRC_RSA];
     0x06 "FE" (fe) @ 0x174..=0x177 => [];
+    0x31 "BLE" (ble) => [];
+    0x42 "BT_SLEEP" (bt_sleep) @ 0x00..=0x03 => [];
 }
 
 impl DeviceSet for Peripherals {
@@ -527,11 +579,12 @@ impl DeviceSet for Peripherals {
     fn block_name(block: u32) -> &'static str { Peripherals::block_name(block) }
     fn misc(&self) -> &Misc { &self.misc }
     fn misc_mut(&mut self) -> &mut Misc { &mut self.misc }
-    /// The three registers whose value depends on another device.
+    /// The registers whose value depends on another device.
     fn pre_access(&mut self, block: u32, _off: u32, write: bool) {
         match block {
             0xc2 if !write => self.intmatrix.status = self.source_status(),   // INTERRUPT_*_STATUS reads the live sources
             0x35 => self.wifi.now_cycles = self.clock.cycles(),               // TSF timestamps
+            0x31 => self.ble.now_cycles = self.clock.cycles(),                // BLE clock samples
             0x08 => self.rtc.now_cycles = self.clock.cycles(),                // SENS ADC samples analog sources at this time
             _ => {}
         }
@@ -546,7 +599,7 @@ impl Peripherals {
             usb: UsbSerialJtag::new(CPU_HZ), uart: [Uart::new(UartLayout::S3), Uart::new(UartLayout::S3), Uart::new(UartLayout::S3)], systimer: Systimer::new(),
             timg: [TimerGroup::new(), TimerGroup::new()], intmatrix: IntMatrix::new(), gpio: Gpio::new(), ledc: Ledc::new(LedcLayout::S3), mcpwm: [Mcpwm::new(160, 9), Mcpwm::new(166, 9)], rtc: RtcCntl::new(),
             efuse: Efuse::new(mac), system: SystemRegs::new(0x30), extmem: Extmem::new(), spi0: SpiMem::new(false), spi1: SpiMem::new(true),
-            i2c: [crate::i2c::I2c::new(), crate::i2c::I2c::new()], lcd_cam: LcdCam::new(), uhci: Uhci::new(), spi2: GpSpi::new(), spi3: GpSpi::with_host(3), pcnt: Pcnt::new(), wifi: WifiMac::new(), fe: FeIq { word: 0 },
+            i2c: [crate::i2c::I2c::new(), crate::i2c::I2c::new()], lcd_cam: LcdCam::new(), uhci: Uhci::new(), spi2: GpSpi::new(), spi3: GpSpi::with_host(3), pcnt: Pcnt::new(), wifi: WifiMac::new(), fe: FeIq { word: 0 }, ble: BleCore::new(), bt_sleep: BtSleep { word: 0 },
             aes: Aes::new(), rsa: Rsa::new(), sha: Sha::new(), wdev: Wdev::new(), i2c_mst: I2cMst::new(), gdma: Gdma::new(), i2s0: I2s::new(CPU_HZ), i2s1: I2s::new(CPU_HZ), rmt: Rmt::new(CPU_HZ),
             io_mux: RegRam::new(), misc: Misc::new(), fake_reads: std::env::var("ESP_EMU_FAKE_READ").ok().map(|v| v.split(',').filter_map(|e| { let mut p = e.split(':'); let a = u32::from_str_radix(p.next()?.trim_start_matches("0x"), 16).ok()?; let o = u32::from_str_radix(p.next().unwrap_or("0").trim_start_matches("0x"), 16).ok()?; let m = u32::from_str_radix(p.next().unwrap_or("ffffffff").trim_start_matches("0x"), 16).ok()?; Some((a, (o, m))) }).collect()).unwrap_or_default(),
             clock: Self::new_clock(),
@@ -560,7 +613,7 @@ impl Peripherals {
             0x00 => "UART0", 0x02 => "SPI1", 0x03 => "SPI0", 0x04 => "GPIO", 0x05 => "FE2", 0x06 => "FE", 0x07 => "EFUSE", 0x08 => "RTC", 0x09 => "IO_MUX",
             0x0b => "HINF", 0x0c => "UHCI1", 0x0f => "I2S0", 0x10 => "UART1", 0x11 => "BT", 0x13 => "I2C0", 0x14 => "UHCI0", 0x15 => "SLCHOST", 0x16 => "RMT", 0x17 => "PCNT",
             0x18 => "SLC", 0x19 => "LEDC", 0x1c => "NRX", 0x1d => "BB", 0x1e => "PWM0", 0x1f => "TIMG0", 0x20 => "TIMG1", 0x21 => "RTC_SLOWMEM", 0x23 => "SYSTIMER",
-            0x24 => "SPI2", 0x25 => "SPI3", 0x26 => "APB_CTRL", 0x27 => "I2C1", 0x28 => "SDMMC", 0x2a => "PERI_BACKUP", 0x2b => "TWAI", 0x2c => "PWM1", 0x2d => "I2S1", 0x2e => "UART2", 0x33 => "WIFI_MAC", 0x34 => "WIFI_MAC2", 0x35 => "WDEV", 0x0e => "I2C_MST",
+            0x24 => "SPI2", 0x25 => "SPI3", 0x26 => "APB_CTRL", 0x27 => "I2C1", 0x28 => "SDMMC", 0x2a => "PERI_BACKUP", 0x2b => "TWAI", 0x2c => "PWM1", 0x2d => "I2S1", 0x2e => "UART2", 0x33 => "WIFI_MAC", 0x34 => "WIFI_MAC2", 0x35 => "WDEV", 0x0e => "I2C_MST", 0x31 => "BLE", 0x42 => "BT_SLEEP",
             0x38 => "USB_SERIAL_JTAG", 0x39 => "USB_WRAP", 0x3a => "AES", 0x3b => "SHA", 0x3c => "RSA", 0x3d => "DS", 0x3e => "HMAC", 0x3f => "GDMA", 0x40 => "APB_SARADC", 0x41 => "LCD_CAM",
             0xc0 => "SYSTEM", 0xc1 => "SENSITIVE", 0xc2 => "INTERRUPT", 0xc4 => "EXTMEM", 0xc5 => "MMU", 0xce => "ASSIST_DEBUG", 0xcf => "ASSIST_DEBUG2", 0xd0 => "WCL",
             _ => "?",
@@ -694,4 +747,31 @@ impl Peripherals {
     }
     /// SYSTEM_CORE_1_CONTROL_0: (clkgate_en, reseting, runstall)
     pub fn core1_control(&self) -> (bool, bool, bool) { let v = self.system.ram.read(0); (v & 2 != 0, v & 4 != 0, v & 1 != 0) }
+}
+
+#[cfg(test)]
+mod bt_tests {
+    use super::*;
+
+    #[test]
+    fn ble_core_resets_samples_its_clock_and_has_a_version() {
+        let mut b = BleCore::new();
+        b.write(0x00, 1 << 31 | 5);
+        assert_eq!(b.read(0x00), 5);
+        assert_eq!(b.read(0x04), 0x0900_1b00);
+        // 1 s and 100 µs: 3200 half-slots, 200 half-µs into the next one
+        b.now_cycles = CPU_HZ + CPU_HZ / 10_000;
+        b.write(0x1c, 1 << 31);
+        assert_eq!(b.read(0x1c), 3200);
+        assert_eq!(b.read(0x20), 624 - 200);
+    }
+
+    #[test]
+    fn bt_sleep_takes_a_request_at_once() {
+        let mut s = BtSleep { word: 0 };
+        s.write(0, 1 << 31 | 0x47);
+        assert_eq!(s.read(0), 1 << 31 | 1 << 15 | 0x47);
+        s.write(0, 0x47);
+        assert_eq!(s.read(0), 0x47);
+    }
 }
