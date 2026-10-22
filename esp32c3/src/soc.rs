@@ -47,6 +47,7 @@ impl esp_soc::SocBus for SocBus {
         else { self.ble.command(command, self.cycles, periph::CPU_HZ) }
     }
     fn ble_nearby(&mut self, list: Vec<esp_soc::ble::peer::Nearby>) -> Result<(), String> { self.ble.set_nearby(list, self.cycles, periph::CPU_HZ) }
+    fn ble_take_log(&mut self) -> Vec<String> { if self.periph.ble_lc.enabled() { Vec::new() } else { self.ble.host_log(self.cycles, periph::CPU_HZ) } }
     fn attach_wifi(&mut self, cfg: esp_soc::wifi::ApConfig, nat: Option<esp_soc::nat::Nat>) -> Result<(), String> {
         self.periph.wifi.link.attach_new(cfg, nat, &self.debug);
         self.periph.refresh_work();

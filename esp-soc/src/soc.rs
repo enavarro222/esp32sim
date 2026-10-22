@@ -122,6 +122,9 @@ pub trait SocBus: Bus {
     fn ble_command(&mut self, _command: &str) -> Result<(), String> { Err("BLE is not enabled".into()) }
     /// The Bluetooth devices around the station (`--ble-nearby`) the virtual controller's scans report.
     fn ble_nearby(&mut self, _list: Vec<crate::ble::peer::Nearby>) -> Result<(), String> { Err("BLE is not enabled".into()) }
+    /// What the virtual BLE peer reported since the last call (connections, discovery, reads, writes,
+    /// notifications), one line each, for a host that drives it.
+    fn ble_take_log(&mut self) -> Vec<String> { Vec::new() }
     /// Put a virtual access point (`--wifi`) and the network behind it, with `nat` to the host if
     /// given, on the air the chip's WiFi MAC hears, logging as the bus's debug flags say. They
     /// survive a guest reboot. A second call replaces them and restarts the link's queues, pacing
