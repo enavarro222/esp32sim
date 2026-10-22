@@ -221,7 +221,7 @@ Selected with `--chip esp32 --board ttgo-tdisplay` (alias `tdisplay`); [esp32.md
 | --- | --- | --- |
 | ST7789 240×320 panel | LCD_CAM i8080 16-bit (CS 2, DC 40, WR 3, D0–D15 on 4 38 5 37 6 36 7 35 8 34 9 33 10 47 11 48) | `DcsPanel`: 8-bit parameters, 16-bit pixels, one transfer per LCD_START |
 | Backlight LEDC on GPIO 45 | LEDC | unmodelled, harmless |
-| Airoha AG3352Q GNSS | UART0 921600 8N1 through UHCI, TX 1, RX 0 | `cc600::gnss::Gnss`: NMEA GGA, RMC and GSV every second while the nRF powers it, `$PAIR` commands acknowledged |
+| Airoha AG3352Q GNSS | UART0 921600 8N1 through UHCI, TX 1, RX 0 | `cc600::gnss::Gnss`: NMEA GGA, RMC and GSV every second, powered from reset (the nRF's `gps_power` 0 cuts it, 1 restarts it), `$PAIR` commands acknowledged |
 | nRF52 (keys, RTC, battery, barometer, light) | UART2 115200 8N1, TX 42, RX 41 | `cc600::nrf::Nrf`: the frames and rates of the real one, sensor stream from reset |
 
 Runs the open firmware ([opencc600](https://github.com/enavarro222/opencc600), esp-hal 1.2 + Embassy)

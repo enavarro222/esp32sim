@@ -3,7 +3,8 @@
 //!     4 38 5 37 6 36 7 35 8 34 9 33 10 47 11 48
 //!   - backlight LEDC on GPIO 45 (unmodelled, harmless)
 //!   - an Airoha AG3352Q GNSS receiver on UART0 (TX 1, RX 0, through UHCI): [`gnss::Gnss`], powered
-//!     by the nRF; `board gnss LAT LON [ALT [KMH [COURSE]]]` sets where it is
+//!     from reset, switched off and restarted by the nRF; `board gnss LAT LON [ALT [KMH [COURSE]]]`
+//!     sets where it is
 //!   - the keys, RTC, battery, barometer and light sensor sit behind an nRF52 on UART2
 //!     (TX 42, RX 41): [`nrf::Nrf`]. Its keys are the pseudo pins `key0` (top left), `key1`
 //!     (bottom left) and `key2` (bottom right), 64..=66, for `press` and the UI's buttons.
@@ -20,12 +21,14 @@ pub mod wire;
 /// Pseudo pin of key 0; keys 1 and 2 follow.
 pub const PIN_KEY0: u8 = 64;
 
-pub struct Cc600 { pub panel: DcsPanel, pub nrf: nrf::Nrf, pub gnss: gnss::Gnss }
+pub struct Cc600 { pub panel: DcsPanel, pub nrf: nrf::Nrf, pub gnss: gnss::Gnss,
+                   /// The nRF's GNSS power commands already applied; `None` before the first poll.
+                   gps_seen: Option<u32> }
 impl Default for Cc600 { fn default() -> Self { Self::new() } }
 
 impl Cc600 {
     pub fn new() -> Self {
-        Cc600 { panel: DcsPanel::st7789(), nrf: nrf::Nrf::new((esp_soc::host::unix_time_ms() / 1000) as i64), gnss: gnss::Gnss::new() }
+        Cc600 { panel: DcsPanel::st7789(), nrf: nrf::Nrf::new((esp_soc::host::unix_time_ms() / 1000) as i64), gnss: gnss::Gnss::new(), gps_seen: None }
     }
 }
 impl BoardModel for Cc600 {
@@ -38,7 +41,16 @@ impl BoardModel for Cc600 {
     }
     fn uart_rx(&mut self, cycle: VirtualCycle) -> Vec<UartInput> {
         self.nrf.advance(cycle);
-        self.gnss.set_power(cycle, self.nrf.gps_power == 1 && !self.nrf.powered_off);
+        // powered from reset (opencc600 docs/REVERSE_NOTES.md, GNSS); gps_power 0 cuts it, 1 restarts it
+        match self.gps_seen {
+            None => self.gnss.set_power(cycle, true),
+            Some(seen) if seen != self.nrf.gps_commands => {
+                self.gnss.set_power(cycle, false);
+                if self.nrf.gps_power != 0 { self.gnss.set_power(cycle, true); }
+            }
+            _ => {}
+        }
+        self.gps_seen = Some(self.nrf.gps_commands);
         self.gnss.advance(cycle);
         let mut inputs = Vec::new();
         for (pin, baud, data) in [(nrf::RX_PIN, nrf::BAUD, self.nrf.transmit(cycle)), (gnss::RX_PIN, gnss::BAUD, self.gnss.transmit(cycle))] {
@@ -94,6 +106,20 @@ mod tests {
 
     /// What esp-hal's `I8080::send` hands over for the firmware's window + RAMWR: 8-bit
     /// parameters, then the 16-bit little-endian frame buffer.
+    #[test]
+    fn the_receiver_runs_from_reset_and_the_nrf_restarts_or_cuts_it() {
+        let mut b = Cc600::new();
+        // a poll applies the nRF's commands, the next one gets the bytes on the wire by then
+        let starts = |b: &mut Cc600, cycle: u64| [cycle, cycle + 2_400_000].iter().flat_map(|&c| b.uart_rx(c))
+            .filter(|i| i.pin == gnss::RX_PIN).map(|i| String::from_utf8_lossy(&i.data).matches("PAIR011,001").count()).sum::<usize>();
+        assert_eq!(starts(&mut b, 100_000_000), 1, "started at reset");
+        for b2 in nrf::frame(2, 0x10, &[0xE2, 0x02, 0x07, 0, 0, 1, 0, 0]) { b.nrf.receive(0, b2); }
+        assert_eq!(starts(&mut b, 200_000_000), 1, "gps_power(1) restarts it");
+        for b2 in nrf::frame(2, 0x10, &[0xE2, 0x02, 0x07, 0, 0, 0, 0, 0]) { b.nrf.receive(0, b2); }
+        b.uart_rx(300_000_000);
+        assert!(!b.gnss.powered());
+    }
+
     #[test]
     fn i8080_transfers_draw_on_the_panel() {
         let mut b = Cc600::new();

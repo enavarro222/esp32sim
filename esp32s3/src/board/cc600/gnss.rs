@@ -1,5 +1,5 @@
 //! The CC600's Airoha AG3352Q GNSS receiver on UART0 (the ESP32's TX GPIO1 to it, its output to
-//! RX GPIO0), 921600 8N1, NMEA; its power comes from the nRF (`gps_power`).
+//! RX GPIO0), 921600 8N1, NMEA; powered from reset, the nRF's `gps_power` cuts or restarts it.
 //!
 //! What the open firmware reads (opencc600 `crates/gnss`): GGA then RMC of the same second (one
 //! epoch), GSV for the satellites in view, `$PAIR001,<command>,<result>` acknowledges and the
