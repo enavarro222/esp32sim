@@ -74,6 +74,12 @@ impl Uart {
     }
     pub fn clock_config(&self) -> u32 { self.ram.read(0x78) }
     pub fn rx_pending(&self) -> usize { self.rx.len() }
+    /// Everything in the receive FIFO, for a DMA reader (UHCI) instead of FIFO reads.
+    pub fn take_rx(&mut self) -> Vec<u8> {
+        let data = self.rx.drain(..).collect();
+        self.refresh_rx_full();
+        data
+    }
     /// Classic ESP32 has a 20-bit divider and selects APB or the 1 MHz reference tick.
     /// ESP-IDF v5.5.4: components/soc/esp32/register/soc/uart_reg.h
     /// (UART_CLKDIV, UART_CLKDIV_FRAG, UART_TICK_REF_ALWAYS_ON) and
