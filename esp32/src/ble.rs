@@ -16,6 +16,7 @@ impl VhciBus for SocBus {
     fn abi() -> Abi {
         Abi {
             code: CODE,
+            radio_code: None,
             ram: DRAM_LOW..DRAM_HIGH,
             hz: crate::periph::CPU_HZ,
             // `esp_bt_controller_config_t.mode`, at 20 from IDF v4.3 to v6.0

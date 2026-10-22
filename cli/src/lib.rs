@@ -792,7 +792,7 @@ fn prepare<S: Soc>(m: &mut Machine<S>, o: &Opts) -> String {
     for p in &o.elfs {
         let data = std::fs::read(p).expect("elf");
         m.add_symbols(&data).expect("elf symbols");
-        if o.ble { let elf = esp_soc::elf::parse(&data).expect("BLE ELF symbols"); if elf.by_name.contains_key("esp_bt_controller_init") { ble_elf = elf; } }
+        if o.ble { let elf = esp_soc::elf::parse(&data).expect("BLE ELF symbols"); if elf.by_name.contains_key("esp_bt_controller_init") || elf.by_name.contains_key("__esp_radio_vTaskDelay") { ble_elf = elf; } }
     }
     if o.ble { m.bus.enable_ble(&ble_elf).unwrap_or_else(|e| usage_error(&format!("--ble: {e}"))); }
     if !o.ble_nearby.is_empty() {
