@@ -4,7 +4,7 @@ Legend: **full** = everything the IDF/Arduino drivers use; **partial** = the pat
 so far; **stub** = accepts writes, returns plausible reads; **—** = not modelled (unknown
 registers are logged with `--log-periph`).
 
-ESP32-S3 peripheral MMIO reads and writes must be aligned 32-bit accesses. Byte and halfword accesses raise a prohibited-access fault before any device side effect; unaligned word accesses raise an alignment fault. This is the emulator policy for unsupported accesses, not a claim about every silicon PMS configuration.
+ESP32-S3 peripheral MMIO reads and writes must be aligned 32-bit accesses. Byte and halfword accesses raise a prohibited-access fault before any device side effect; unaligned word accesses raise an alignment fault. This is the emulator policy for unsupported accesses, not a claim about every silicon PMS configuration. Past the last device, up to 0x60FFFFFF, where no memory sits, an aligned word reads 0 and a write is dropped without a fault: with `CONFIG_ESP_CONSOLE_NONE` IDF selects ROM print channel 255 and the ROM's `uart_tx_one_char_uart` then polls 0x60FFE01C, which firmware built that way survives on the chip.
 
 | Block | Base | Status | Modelled |
 | --- | --- | --- | --- |
