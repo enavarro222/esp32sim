@@ -227,6 +227,18 @@ pub unsafe extern "C" fn esp32sim_load_at(e: *mut Emu, offset: u32, ptr: *const 
     match e.m.write_flash(offset as usize, data) { Ok(()) => 0, Err(msg) => { log(&format!("[emu] flash {:#x}: {}", offset, msg)); 1 } }
 }
 
+/// Read flash back (a data partition the firmware wrote, to keep it): a pointer to `len` bytes at
+/// `offset`, valid until the next call into the emulator, or null past the end of the flash.
+///
+/// # Safety
+/// `e` must point to a live emulator to which the caller has shared access.
+#[no_mangle]
+pub unsafe extern "C" fn esp32sim_read_flash(e: *mut Emu, offset: u32, len: usize) -> *const u8 {
+    // SAFETY: The caller provides shared access to a live emulator.
+    let e = unsafe { &*e };
+    e.m.read_flash(offset as usize, len).map_or(std::ptr::null(), |d| d.as_ptr())
+}
+
 /// `--stub NAME[=value]`: return `value` immediately when execution reaches the function's entry.
 /// NAME is a symbol (needs the ELF loaded) or a hex address. Returns 1 if it cannot be resolved.
 ///

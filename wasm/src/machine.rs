@@ -9,6 +9,7 @@ pub(super) trait MachineApi {
     fn bus(&mut self) -> &mut dyn SocBus;
     fn load(&mut self, kind: u32, d: &[u8]) -> Result<(), String>;
     fn write_flash(&mut self, off: usize, d: &[u8]) -> Result<(), String>;
+    fn read_flash(&self, off: usize, len: usize) -> Option<&[u8]>;
     fn boot(&mut self, app_direct: bool) -> Result<(), String>;
     fn board_name(&self) -> String;
     /// The chip, as the `Soc` names it (`esp32s3`, `esp32c3`, `esp32c6`, `esp32`).
@@ -31,6 +32,7 @@ impl<S: Soc> MachineApi for Machine<S> {
         self.load_input(esp_soc::LoadKind::try_from(kind)?, d)
     }
     fn write_flash(&mut self, off: usize, d: &[u8]) -> Result<(), String> { Machine::write_flash(self, off, d) }
+    fn read_flash(&self, off: usize, len: usize) -> Option<&[u8]> { Machine::read_flash(self, off, len) }
     fn boot(&mut self, app_direct: bool) -> Result<(), String> { if app_direct { self.boot_app(0x10000).map(|_| ()) } else { self.boot_rom(); Ok(()) } }
     fn board_name(&self) -> String { self.bus.board_ref().name().to_string() }
     fn chip(&self) -> &'static str { S::NAME }

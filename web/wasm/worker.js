@@ -139,6 +139,7 @@ onmessage = async (ev) => {
       postMessage({ created: emu !== 0 });
     }
     else if (m.op === 'load') { const rc = withBytes(new Uint8Array(m.data), (p, n) => m.at !== undefined ? wasm.esp32sim_load_at(emu, m.at >>> 0, p, n) : wasm.esp32sim_load(emu, m.kind, p, n)); postMessage({ loaded: m.at !== undefined ? 'at' + m.at : m.kind, ok: rc === 0 }); }
+    else if (m.op === 'read') { const p = wasm.esp32sim_read_flash(emu, m.at >>> 0, m.len >>> 0); const data = p ? mem().slice(p, p + m.len).buffer : null; postMessage({ read: m.at, data }, data ? [data] : []); }
     else if (m.op === 'stub') { if (withBytes(enc.encode(m.spec), (p, n) => wasm.esp32sim_stub_spec(emu, p, n)) !== 0) setupError ||= 'invalid stub: ' + m.spec; }
     else if (m.op === 'ble') { if (withBytes(new Uint8Array(m.data), (p, n) => wasm.esp32sim_ble_virtual(emu, p, n)) !== 0) setupError ||= 'virtual BLE failed (see console)'; }
     else if (m.op === 'wifi') { if (withBytes(enc.encode(m.spec), (p, n) => wasm.esp32sim_wifi(emu, p, n)) !== 0) setupError ||= 'invalid WiFi configuration (see console)'; }
