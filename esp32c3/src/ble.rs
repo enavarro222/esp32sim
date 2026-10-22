@@ -13,7 +13,7 @@ pub fn intercept(cpu: &mut riscv_rv32::Cpu, bus: &mut SocBus) -> bool {
 }
 
 impl VhciBus for SocBus {
-    fn abi() -> Abi { Abi { code: CODE, ram: DRAM_LOW..DRAM_HIGH, hz: crate::periph::CPU_HZ } }
+    fn abi() -> Abi { Abi { code: CODE, radio_code: None, ram: DRAM_LOW..DRAM_HIGH, hz: crate::periph::CPU_HZ } }
     fn ble(&mut self) -> &mut Ble { &mut self.ble }
     fn valid_callback(&mut self, pc: u32) -> bool {
         pc & 1 == 0
