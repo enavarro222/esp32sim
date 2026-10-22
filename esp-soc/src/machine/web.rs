@@ -70,6 +70,9 @@ impl<S: Soc> Machine<S> {
             w.send_binary(&b);
             self.ws.audio_sent = pcm.len();
         }
+        for line in self.bus.ble_take_log() {
+            w.send_text(&format!("{{\"t\":\"ble\",\"line\":\"{}\"}}", json_escape(&line)));
+        }
         let board = self.bus.board_ref();
         let grids: Vec<(&'static str, Vec<[u8; 3]>, u64)> =
             board.led_grids().into_iter().map(|(id, leds, updates)| (id, leds.to_vec(), updates)).collect();
@@ -153,6 +156,14 @@ impl<S: Soc> Machine<S> {
                         Some("uart0") => self.bus.uart_input(0, data.as_bytes()),
                         Some("uart1") => self.bus.uart_input(1, data.as_bytes()),
                         _ => self.bus.serial_input(data.as_bytes()),
+                    }
+                }
+                // a line for the virtual BLE peer (`connect`, `discover`, `write HANDLE HEX`, ...);
+                // what it reports comes back as {"t":"ble","line":...}
+                "ble" => {
+                    let line = field("line").unwrap_or_default();
+                    if let Err(error) = self.bus.ble_command(&line) {
+                        w.send_text(&format!("{{\"t\":\"ble\",\"error\":\"{}\"}}", json_escape(&error)));
                     }
                 }
                 "board_cmd" => {

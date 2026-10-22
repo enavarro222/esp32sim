@@ -40,6 +40,7 @@ impl esp_soc::SocBus for SocBus {
     fn ble_pending_commands(&self) -> usize { self.ble.session.pending_commands() }
     fn ble_command(&mut self, command: &str) -> Result<(), String> { self.ble.command(command, self.cycles) }
     fn ble_nearby(&mut self, list: Vec<esp_soc::ble::peer::Nearby>) -> Result<(), String> { self.ble.set_nearby(list, self.cycles) }
+    fn ble_take_log(&mut self) -> Vec<String> { self.ble.host_log(self.cycles) }
     fn attach_wifi(&mut self, cfg: esp_soc::wifi::ApConfig, nat: Option<esp_soc::nat::Nat>) -> Result<(), String> {
         self.periph.wifi_mac.link.attach_new(cfg, nat, &self.debug);
         Ok(())
