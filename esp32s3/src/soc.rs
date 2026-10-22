@@ -214,6 +214,7 @@ impl esp_soc::SocBus for SocBus {
         self.refresh_tick_budget();
     }
     fn gpio_set_input(&mut self, pin: u8, level: bool) {
+        if self.board.host_input(self.cycles, pin, level) { self.refresh_tick_budget(); return; }
         self.irq_dirty |= self.periph.gpio.set_input(pin, level);
         // Host edges queue PCNT work without going through the MMIO refresh hook.
         // Recompute the threshold without dropping cycles already pending.

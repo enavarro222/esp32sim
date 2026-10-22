@@ -118,6 +118,10 @@ pub trait BoardModel {
     /// GPIO edges due by the last advance, including synchronous output responses.
     /// GPIO reads drain these even without elapsed cycles; retain future edges until due.
     fn take_edges(&mut self) -> Vec<BoardEdge> { Vec::new() }
+    /// A host drive (script `press`/`gpio`, the UI's `btn`) of a pin the board owns rather than
+    /// the chip, such as a key behind a co-processor: true when consumed, then the GPIO matrix
+    /// never sees it. Honoured by the S3.
+    fn host_input(&mut self, _cycle: VirtualCycle, _pin: u8, _level: bool) -> bool { false }
     /// A pin by the name scripts and the UI use (`btn1`, `sw`, ...).
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
     /// The rotary encoder's (CLK, DT) pins, if there is one.
