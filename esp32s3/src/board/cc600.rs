@@ -2,6 +2,8 @@
 //!   - ST7789 240×320 on the LCD_CAM i8080 16-bit bus: CS 2, DC 40, WR 3, D0–D15 on
 //!     4 38 5 37 6 36 7 35 8 34 9 33 10 47 11 48
 //!   - backlight LEDC on GPIO 45 (unmodelled, harmless)
+//!   - an Airoha AG3352Q GNSS receiver on UART0 (TX 1, RX 0, through UHCI): [`gnss::Gnss`], powered
+//!     by the nRF; `board gnss LAT LON [ALT [KMH [COURSE]]]` sets where it is
 //!   - the keys, RTC, battery, barometer and light sensor sit behind an nRF52 on UART2
 //!     (TX 42, RX 41): [`nrf::Nrf`]. Its keys are the pseudo pins `key0` (top left), `key1`
 //!     (bottom left) and `key2` (bottom right), 64..=66, for `press` and the UI's buttons.
@@ -11,17 +13,19 @@ use esp_soc::board::{BoardModel, VirtualCycle};
 use esp_soc::devices::DcsPanel;
 use esp_soc::uart::{UartInput, UartRoute};
 
+pub mod gnss;
 pub mod nrf;
+pub mod wire;
 
 /// Pseudo pin of key 0; keys 1 and 2 follow.
 pub const PIN_KEY0: u8 = 64;
 
-pub struct Cc600 { pub panel: DcsPanel, pub nrf: nrf::Nrf }
+pub struct Cc600 { pub panel: DcsPanel, pub nrf: nrf::Nrf, pub gnss: gnss::Gnss }
 impl Default for Cc600 { fn default() -> Self { Self::new() } }
 
 impl Cc600 {
     pub fn new() -> Self {
-        Cc600 { panel: DcsPanel::st7789(), nrf: nrf::Nrf::new((esp_soc::host::unix_time_ms() / 1000) as i64) }
+        Cc600 { panel: DcsPanel::st7789(), nrf: nrf::Nrf::new((esp_soc::host::unix_time_ms() / 1000) as i64), gnss: gnss::Gnss::new() }
     }
 }
 impl BoardModel for Cc600 {
@@ -30,13 +34,29 @@ impl BoardModel for Cc600 {
     fn uses_uart_pins(&self) -> bool { true }
     fn uart_tx(&mut self, cycle: VirtualCycle, route: UartRoute, byte: u8) {
         if route.transmits_on(nrf::TX_PIN) && route.matches_baud(nrf::BAUD) { self.nrf.receive(cycle, byte); }
+        if route.transmits_on(gnss::TX_PIN) && route.matches_baud(gnss::BAUD) { self.gnss.receive(cycle, byte); }
     }
     fn uart_rx(&mut self, cycle: VirtualCycle) -> Vec<UartInput> {
         self.nrf.advance(cycle);
-        let data = self.nrf.transmit(cycle);
-        if data.is_empty() { Vec::new() } else { vec![UartInput::new(nrf::RX_PIN, nrf::BAUD, data)] }
+        self.gnss.set_power(cycle, self.nrf.gps_power == 1 && !self.nrf.powered_off);
+        self.gnss.advance(cycle);
+        let mut inputs = Vec::new();
+        for (pin, baud, data) in [(nrf::RX_PIN, nrf::BAUD, self.nrf.transmit(cycle)), (gnss::RX_PIN, gnss::BAUD, self.gnss.transmit(cycle))] {
+            if !data.is_empty() { inputs.push(UartInput::new(pin, baud, data)); }
+        }
+        inputs
     }
-    fn next_deadline(&self) -> Option<VirtualCycle> { Some(self.nrf.next_deadline()) }
+    fn next_deadline(&self) -> Option<VirtualCycle> {
+        Some(self.gnss.next_deadline().map_or(self.nrf.next_deadline(), |g| g.min(self.nrf.next_deadline())))
+    }
+    fn command(&mut self, _cycle: VirtualCycle, line: &str) -> Result<(), String> {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let ["gnss", args @ ..] = words.as_slice() else { return Err(format!("cc600: unknown command {line:?} (gnss ...)")) };
+        self.gnss.command(args)?;
+        // the barometer follows the receiver's altitude
+        if let Some(p) = self.gnss.position { self.nrf.altitude_m = p.alt_m; }
+        Ok(())
+    }
     fn host_input(&mut self, cycle: VirtualCycle, pin: u8, level: bool) -> bool {
         let Some(key) = pin.checked_sub(PIN_KEY0).filter(|&k| k < 3) else { return false };
         self.nrf.key(cycle, key as usize, !level);
@@ -60,9 +80,11 @@ impl BoardModel for Cc600 {
     fn report(&self) -> String {
         let p = &self.panel;
         let n = &self.nrf;
-        format!("[emu] panel: {} RAMWR, {} pixels, madctl={:#x} inverted={} on={} bbox={:?}\n[emu] nrf: {} frames in, {} out, {} key events, gps power {}{}",
+        let g = &self.gnss;
+        format!("[emu] panel: {} RAMWR, {} pixels, madctl={:#x} inverted={} on={} bbox={:?}\n[emu] nrf: {} frames in, {} out, {} key events, gps power {}{}\n[emu] gnss: {} epochs, {} $PAIR commands, {}",
             p.frames, p.pixels_written, p.madctl, p.inverted, p.on, p.bbox(), n.frames_in, n.frames_out, n.key_events, n.gps_power,
-            if n.powered_off { ", powered off" } else { "" })
+            if n.powered_off { ", powered off" } else { "" }, g.epochs, g.commands,
+            g.position.map_or("no position".into(), |p| format!("at {:.5} {:.5}", p.lat, p.lon)))
     }
 }
 

@@ -221,6 +221,7 @@ Selected with `--chip esp32 --board ttgo-tdisplay` (alias `tdisplay`); [esp32.md
 | --- | --- | --- |
 | ST7789 240×320 panel | LCD_CAM i8080 16-bit (CS 2, DC 40, WR 3, D0–D15 on 4 38 5 37 6 36 7 35 8 34 9 33 10 47 11 48) | `DcsPanel`: 8-bit parameters, 16-bit pixels, one transfer per LCD_START |
 | Backlight LEDC on GPIO 45 | LEDC | unmodelled, harmless |
+| Airoha AG3352Q GNSS | UART0 921600 8N1 through UHCI, TX 1, RX 0 | `cc600::gnss::Gnss`: NMEA GGA, RMC and GSV every second while the nRF powers it, `$PAIR` commands acknowledged |
 | nRF52 (keys, RTC, battery, barometer, light) | UART2 115200 8N1, TX 42, RX 41 | `cc600::nrf::Nrf`: the frames and rates of the real one, sensor stream from reset |
 
 Runs the open firmware ([opencc600](https://github.com/enavarro222/opencc600), esp-hal 1.2 + Embassy)
@@ -232,8 +233,12 @@ The keys are behind the nRF, not on GPIOs: the pseudo pins `key0` (top left), `k
 `key2` (bottom right), 64 to 66, reach it through `BoardModel::host_input`, so `press key2 150` is a
 click and a press longer than 0.5 s a long press, repeated every 250 ms like the real keys. The RTC
 starts at the host's time and takes the firmware's `set_rtc`; the battery reads 80 % on battery, the
-barometer 150 m in the standard atmosphere. `power_off` stops the stream (the report says so); the
-GNSS power command is only recorded, the receiver (UART0 through UHCI) is not modelled.
+barometer 150 m in the standard atmosphere. `power_off` stops the stream (the report says so).
+
+The receiver has no fix until it is given a position: `board gnss LAT LON [ALT_M [SPEED_KMH
+[COURSE_DEG]]]` in a script or `{"t":"board_cmd","line":"gnss ..."}` from the page, sent again for
+every point of a replayed track; the barometer follows the altitude. `board gnss nofix` drops the
+fix, `board gnss ttff 30` sets the time to first fix after power-on (3 s). Its UTC is the host's.
 
 ## `none` — bare module
 
