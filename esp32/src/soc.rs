@@ -67,6 +67,7 @@ impl esp_soc::SocBus for SocBus {
     fn ble_enabled(&self) -> bool { !self.ble.hooks.is_empty() }
     fn ble_pending_commands(&self) -> usize { self.ble.session.pending_commands() }
     fn ble_command(&mut self, command: &str) -> Result<(), String> { self.ble.command(command, self.cycles, periph::CPU_HZ) }
+    fn ble_take_log(&mut self) -> Vec<String> { self.ble.host_log(self.cycles, periph::CPU_HZ) }
     fn attach_wifi(&mut self, cfg: esp_soc::wifi::ApConfig, nat: Option<esp_soc::nat::Nat>) -> Result<(), String> {
         self.periph.wifi.link.attach_new(cfg, nat, &self.debug);
         Ok(())

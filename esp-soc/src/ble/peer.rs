@@ -52,6 +52,8 @@ pub enum Command {
     Discover,
     Read(u16),
     Write(u16, Vec<u8>),
+    /// ATT Write Command: no response, nothing waits for it.
+    WriteCommand(u16, Vec<u8>),
     ReadUuid([u8; 16], [u8; 16]),
 }
 impl std::str::FromStr for Command {
@@ -64,8 +66,8 @@ impl std::str::FromStr for Command {
             ["disconnect"] => return Ok(Self::Disconnect),
             ["discover"] => return Ok(Self::Discover),
             ["read-uuid", service, characteristic] => return Ok(Self::ReadUuid(parse_uuid(service)?, parse_uuid(characteristic)?)),
-            ["read" | "subscribe", _] | ["write", _, _] => {}
-            _ => return Err("expected connect, central-stop, disconnect, discover, read HANDLE, read-uuid SERVICE CHARACTERISTIC, write HANDLE HEX, subscribe CCC_HANDLE".into()),
+            ["read" | "subscribe", _] | ["write" | "write-cmd", _, _] => {}
+            _ => return Err("expected connect, central-stop, disconnect, discover, read HANDLE, read-uuid SERVICE CHARACTERISTIC, write HANDLE HEX, write-cmd HANDLE HEX, subscribe CCC_HANDLE".into()),
         }
         let handle =
             if let Some(h) = parts[1].strip_prefix("0x") { u16::from_str_radix(h, 16) } else { parts[1].parse() }
@@ -79,7 +81,7 @@ impl std::str::FromStr for Command {
                 let value = parts[2];
                 let bytes = hex_bytes(value).filter(|b| b.len() <= 20)
                     .ok_or("BLE write requires at most 20 bytes of hexadecimal data")?;
-                Self::Write(handle, bytes)
+                if parts[0] == "write-cmd" { Self::WriteCommand(handle, bytes) } else { Self::Write(handle, bytes) }
             }
         })
     }
@@ -161,6 +163,10 @@ pub struct Peer {
     guest_central: bool,
     pending: Option<Request>,
     discovery_start: u16,
+    /// The services found, and the one whose characteristics are being discovered: a phone
+    /// asks service by service, and a server may not mix 16- and 128-bit UUIDs in one answer.
+    services: Vec<(u16, u16)>,
+    service: usize,
     value: Vec<u8>,
 }
 impl Peer {
@@ -175,6 +181,8 @@ impl Peer {
             guest_central: false,
             pending: None,
             discovery_start: 1,
+            services: Vec::new(),
+            service: 0,
             value: vec![100],
         }
     }
@@ -203,7 +211,7 @@ impl Peer {
             if !self.connected || self.guest_central { break; }
             match self.commands.pop_front().unwrap() {
                 Command::Connect | Command::CentralStop | Command::Disconnect | Command::ReadUuid(..) => unreachable!(),
-                Command::Discover => self.discover(Request::Services, 1),
+                Command::Discover => { self.services.clear(); self.discover(Request::Services, 1) }
                 Command::Read(handle) => {
                     self.pending = Some(Request::Read(handle));
                     self.att(&att_read(handle));
@@ -213,6 +221,12 @@ impl Peer {
                     let mut p = vec![0x12, handle as u8, (handle >> 8) as u8];
                     p.extend(value);
                     self.att(&p);
+                }
+                Command::WriteCommand(handle, value) => {
+                    let mut p = vec![0x52, handle as u8, (handle >> 8) as u8];
+                    p.extend(value);
+                    self.att(&p);
+                    self.log.push(format!("write command handle=0x{handle:04x}"));
                 }
             }
         }
@@ -279,7 +293,7 @@ impl Peer {
         self.pending = Some(kind);
         self.discovery_start = start;
         let p = match kind {
-            Request::Characteristics => read_by_type(start, u16::MAX),
+            Request::Characteristics => read_by_type(start, self.services.get(self.service).map_or(u16::MAX, |s| s.1)),
             Request::Services => vec![0x10, start as u8, (start >> 8) as u8, 0xff, 0xff, 0, 0x28],
             _ => vec![4, start as u8, (start >> 8) as u8, 0xff, 0xff],
         };
@@ -287,8 +301,20 @@ impl Peer {
     }
     fn discovery_next(&mut self, kind: Request) {
         match kind {
-            Request::Services => self.discover(Request::Characteristics, 1),
-            Request::Characteristics => self.discover(Request::Descriptors, 1),
+            Request::Services => {
+                self.service = 0;
+                match self.services.first() {
+                    Some(&(start, _)) => self.discover(Request::Characteristics, start),
+                    None => self.discover(Request::Descriptors, 1),
+                }
+            }
+            Request::Characteristics => {
+                self.service += 1;
+                match self.services.get(self.service) {
+                    Some(&(start, _)) => self.discover(Request::Characteristics, start),
+                    None => self.discover(Request::Descriptors, 1),
+                }
+            }
             Request::Descriptors => self.log.push("discovery complete".into()),
             _ => {}
         }
@@ -368,6 +394,8 @@ impl Peer {
                 };
                 if !allowed || p.len() == 2 || !(p.len() - 2).is_multiple_of(size) {
                     self.log.push(format!("invalid ATT entry size {}", hex(p)));
+                    // the last step: what was found stands
+                    if kind == Request::Descriptors { self.log.push("discovery complete".into()); }
                     return;
                 }
                 let mut last = 0;
@@ -382,6 +410,7 @@ impl Peer {
                     match kind {
                         Request::Services => {
                             last = word(&item[2..]);
+                            self.services.push((word(item), last));
                             self.log.push(format!(
                                 "service start=0x{:04x} end=0x{last:04x} uuid={}",
                                 word(item),
@@ -397,7 +426,11 @@ impl Peer {
                         _ => self.log.push(format!("attribute handle=0x{last:04x} uuid={}", uuid(&item[2..]))),
                     }
                 }
-                if last == u16::MAX {
+                let end = match kind {
+                    Request::Characteristics => self.services.get(self.service).map_or(u16::MAX, |s| s.1),
+                    _ => u16::MAX,
+                };
+                if last >= end {
                     self.discovery_next(kind);
                 } else { self.discover(kind, last + 1); }
             }
@@ -450,6 +483,8 @@ pub struct Session {
     pub controller: Box<dyn HciController>,
     pub peer: Peer,
     cycles: u64,
+    /// The peer's lines kept for a host that drives it (`take_host_log`), once one has asked.
+    host_log: Option<Vec<String>>,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -458,7 +493,7 @@ impl Default for Session {
     }
 }
 impl Session {
-    pub fn new(controller: Box<dyn HciController>, link: Link) -> Self { Self { controller, peer: Peer::new(link), cycles: 0 } }
+    pub fn new(controller: Box<dyn HciController>, link: Link) -> Self { Self { controller, peer: Peer::new(link), cycles: 0, host_log: None } }
     pub fn reset(&mut self) {
         self.controller.reset();
         self.peer = Peer::new(self.peer.link.clone());
@@ -488,7 +523,13 @@ impl Session {
     pub fn pending_commands(&self) -> usize {
         self.peer.commands.len() + usize::from(self.peer.pending.is_some()) + usize::from(self.peer.connecting)
     }
-    pub fn drain_log(&mut self) -> Vec<String> { std::mem::take(&mut self.peer.log) }
+    pub fn drain_log(&mut self) -> Vec<String> {
+        let lines = std::mem::take(&mut self.peer.log);
+        if let Some(host) = &mut self.host_log { host.extend(lines.iter().cloned()); }
+        lines
+    }
+    /// The lines drained since the last call; from the first call on, they are kept for the next.
+    pub fn take_host_log(&mut self) -> Vec<String> { self.host_log.replace(Vec::new()).unwrap_or_default() }
     pub fn is_advertising(&self) -> bool { self.peer.advertising }
 }
 #[cfg(test)]
@@ -670,6 +711,41 @@ mod tests {
         assert!(c.peer.log.iter().any(|s| s.contains("text=\"hello\"")));
         assert!(c.peer.log.iter().any(|s| s.contains("notification handle=0x0003 value=00000000")));
         assert!(c.command("write 3 invalid").is_err());
+        // a write command goes out at once and nothing waits for an answer
+        c.command("write-cmd 3 0102").unwrap();
+        let sent: Vec<_> = std::iter::from_fn(|| c.pop_packet()).collect();
+        assert_eq!(sent.last().map(|p| &p[9..]), Some(&[0x52, 3, 0, 1, 2][..]));
+        assert!(c.peer.pending.is_none());
+        assert!(c.peer.log.iter().any(|s| s == "write command handle=0x0003"));
+        // a host that asked once gets every line drained after, whoever drained it
+        c.drain_log();
+        assert!(c.take_host_log().is_empty());
+        c.command("write-cmd 3 03").unwrap();
+        assert_eq!(c.drain_log().last().map(String::as_str), Some("write command handle=0x0003"));
+        assert_eq!(c.take_host_log().len(), 1);
+    }
+    #[test]
+    fn characteristics_are_discovered_service_by_service() {
+        // the next ATT PDU the peer sent (HCI events in between skipped)
+        let att = |c: &mut Session| loop { let p = c.pop_packet().unwrap(); if p[0] == 2 { break p[9..].to_vec() } };
+        let mut c = Session::default();
+        connect(&mut c);
+        c.command("discover").unwrap();
+        att(&mut c);
+        acl(&mut c, &[0x11, 6, 1, 0, 5, 0, 0x0f, 0x18, 6, 0, 9, 0, 0x0a, 0x18]);
+        assert_eq!(att(&mut c), [0x10, 0x0a, 0, 0xff, 0xff, 0, 0x28]);
+        acl(&mut c, &[1, 0x10, 0x0a, 0, 0x0a]);
+        // the first service only, then the second from its start
+        assert_eq!(att(&mut c), read_by_type(1, 5));
+        acl(&mut c, &[9, 7, 2, 0, 0x1a, 3, 0, 0x19, 0x2a]);
+        assert_eq!(att(&mut c), read_by_type(3, 5));
+        acl(&mut c, &[1, 8, 3, 0, 0x0a]);
+        assert_eq!(att(&mut c), read_by_type(6, 9));
+        acl(&mut c, &[1, 8, 6, 0, 0x0a]);
+        assert_eq!(att(&mut c), [4, 1, 0, 0xff, 0xff]);
+        // a server's malformed Find Information answer ends the discovery with what was found
+        acl(&mut c, &[5, 3, 4, 0, 2, 0x29]);
+        assert!(c.drain_log().iter().any(|s| s == "discovery complete"));
     }
     #[test]
     fn malformed_commands_and_discovery_do_not_advance_state() {

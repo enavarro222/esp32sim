@@ -132,6 +132,11 @@ impl Ble {
     fn log(&mut self, cycles: u64) {
         for line in self.session.drain_log() { eprintln!("[ble] t={:.6}s {line}", cycles as f64 / crate::periph::CPU_HZ as f64); }
     }
+    /// What the peer reported since the last call, printed as always (`Soc::ble_take_log`).
+    pub fn host_log(&mut self, cycles: u64) -> Vec<String> {
+        self.log(cycles);
+        self.session.take_host_log()
+    }
 }
 
 fn supported_idf(version: &str) -> bool {
