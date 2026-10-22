@@ -120,6 +120,9 @@
     catch (err) { setStatus(err.message); return; }
     const ok = await ask('created', { op: 'create', board: cfg.board, smoothDisplay: cfg.smoothDisplay === true, flash_mb: cfg.flash_mb, psram_mb: cfg.psram_mb, jit: q.get('jit') !== '0', experiments });
     if (!ok) { setStatus('could not create emulator: check board and memory sizes (maximum 32 MiB)'); return; }
+    // the virtual controller hooks the application ELF: keep a copy, the loads transfer the buffers
+    const bleElf = cfg.ble ? files.find(([kind]) => kind === 'elf')?.[1].slice(0) : null;
+    if (cfg.ble && !bleElf) { setStatus('"ble" needs the application ELF'); return; }
     for (const [kind, data, at] of files) {
       // `c6:KIND` is the co-processor's image (the module's COPROC_KIND bit), as is a flash offset with bit 31 set
       const k = kind.startsWith('c6:') ? KINDS[kind.slice(3)] | 0x100 : KINDS[kind];
@@ -128,6 +131,7 @@
       if (!good) { setStatus('failed to load ' + (at !== undefined ? 'flash@0x' + at.toString(16) : kind) + ' (see console)'); return; }
     }
     for (const st of cfg.stubs || []) post({ op: 'stub', spec: stubSpec(st, cfg.symbols) });
+    if (bleElf) post({ op: 'ble', data: bleElf }, [bleElf]);
     if (cfg.wifi) post({ op: 'wifi', spec: cfg.wifi });
     post({ op: 'start', appDirect: !!cfg.appDirect });
   }
@@ -190,7 +194,7 @@
       // coproc: { files: {...}, flash_at: {...} } — the ESP32-C6 next to a P4 (board `esp32p4…+c6`)
       for (const [kind, u] of Object.entries((man.coproc || {}).files || {})) { const r = await fetch(`wasm/fw/${u}`, { cache: 'no-cache' }); if (!r.ok) { fail(missing(u, r.status)); return; } files.push(['c6:' + kind, await r.arrayBuffer()]); }
       for (const [off, u] of Object.entries((man.coproc || {}).flash_at || {})) { const r = await fetch(`wasm/fw/${u}`, { cache: 'no-cache' }); if (!r.ok) { fail(missing(u, r.status)); return; } files.push(['flash', await r.arrayBuffer(), (parseInt(off, 16) | 0x80000000) >>> 0]); }
-      const cfg = { board: man.board, flash_mb: man.flash_mb || 8, psram_mb: man.psram_mb || 2, wifi: man.wifi || '', stubs: man.stubs || [], symbols: man.symbols || {}, appDirect: !!man.app_direct, nodes: man.nodes, slice_ns: man.slice_ns };
+      const cfg = { board: man.board, flash_mb: man.flash_mb || 8, psram_mb: man.psram_mb || 2, wifi: man.wifi || '', stubs: man.stubs || [], symbols: man.symbols || {}, ble: !!man.ble, appDirect: !!man.app_direct, nodes: man.nodes, slice_ns: man.slice_ns };
       const nodeFiles = [];
       for (const node of man.nodes || []) { const own = []; for (const [kind, url] of Object.entries(node.files || {})) for (const u of [].concat(url)) { const r = await fetch(`wasm/fw/${u}`, { cache: 'no-cache' }); if (!r.ok) { fail(missing(u, r.status)); return; } own.push([kind, await r.arrayBuffer()]); } nodeFiles.push(own); }
       const wait = () => ready ? (man.nodes ? bootNet(cfg, files, nodeFiles) : boot(cfg, files)) : setTimeout(wait, 50);

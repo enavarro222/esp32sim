@@ -1,6 +1,22 @@
-//! Passive observation of the C3 full link controller.
-use super::{log, Emu, MachineKind};
+//! The virtual VHCI controller (`--ble`), and passive observation of the C3 full link controller.
+use super::{bytes, log, Emu, MachineKind};
 use esp_soc::SocBus;
+
+/// `--ble`: the virtual VHCI controller, hooked through the application ELF at `ptr` (the one
+/// also loaded for symbols). Before boot. Returns 0, or 1 with the reason logged.
+/// # Safety
+/// `e` must be a live emulator with exclusive access for this call. For nonzero `len`, `ptr` must
+/// be non-null and readable for `len` bytes throughout this call.
+#[no_mangle]
+pub unsafe extern "C" fn esp32sim_ble_virtual(e: *mut Emu, ptr: *const u8, len: usize) -> u32 {
+    let e = unsafe { &mut *e };
+    if e.booted { log("[emu] BLE must be enabled before boot"); return 1 }
+    let elf = match esp_soc::elf::parse(unsafe { bytes(ptr, len) }) {
+        Ok(elf) => elf,
+        Err(reason) => { log(&format!("[emu] BLE ELF: {reason}")); return 1 }
+    };
+    match e.m.bus().enable_ble(&elf) { Ok(()) => 0, Err(reason) => { log(&format!("[emu] --ble: {reason}")); 1 } }
+}
 
 /// Enable the full controller before boot. Returns 1 for other chips or after boot.
 /// # Safety
