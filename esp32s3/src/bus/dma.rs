@@ -696,27 +696,9 @@ impl SocBus {
         let user = self.periph.lcd_cam.lcd_user;
         let mut data = Vec::new();
         if user & (1 << 24) != 0 {
-            if let Some(ch) = self.periph.gdma.out_channel_for(5) {
-                let mut walk = DescriptorWalk::new(GDMA_DESCRIPTOR_STEP_BUDGET);
-                loop {
-                    let c = self.periph.gdma.out[ch];
-                    if !c.running || c.desc == 0 { break; }
-                    let Ok((_, d)) = walk.read(self, c.desc) else { self.fail_dma_out(ch); break };
-                    let (length, eof, buf, next) = (d.length, d.eof, d.buf, d.next);
-                    let remaining = length.saturating_sub(c.buf_pos) as usize;
-                    if remaining > 0 && self.append_mapped_bytes(buf.wrapping_add(c.buf_pos), remaining, &mut data).is_err() {
-                        self.fail_dma_out(ch); break;
-                    }
-                    let ch_ref = &mut self.periph.gdma.out[ch];
-                    ch_ref.int_raw |= 1 << 0;
-                    if eof { ch_ref.int_raw |= 1 << 1; ch_ref.eof_desc = c.desc; }
-                    if next == 0 { ch_ref.running = false; ch_ref.desc = 0; ch_ref.int_raw |= 1 << 3; break; }
-                    ch_ref.desc = next; ch_ref.buf_pos = 0;
-                    // the LCD ends the transfer at the EOF descriptor (IDF's esp_lcd chains one
-                    // transaction after another with LCD_ALWAYS_OUT_EN)
-                    if eof { break; }
-                }
-            }
+            // the LCD ends the transfer at the EOF descriptor (IDF's esp_lcd chains one transaction
+            // after another with LCD_ALWAYS_OUT_EN)
+            if let Some(ch) = self.periph.gdma.out_channel_for(5) { self.drain_dma_out(ch, &mut data, true); }
         }
         let cmd = (user & (1 << 26) != 0).then(|| self.periph.lcd_cam.ram.read(0x28));
         if self.periph.lcd_cam.lcd_log { eprintln!("[lcd] i8080 cmd {:x?} + {} bytes ({}-bit)", cmd, data.len(), if user & (1 << 23) != 0 { 16 } else { 8 }); }
@@ -724,6 +706,58 @@ impl SocBus {
         self.periph.lcd_cam.lcd_user &= !(1 << 27);
         self.periph.lcd_cam.int_raw |= 1 << 1;                                       // LCD_TRANS_DONE_INT
         self.irq_dirty = true;
+    }
+
+    /// Every byte of an OUT channel's descriptor chain at once, or up to its first EOF descriptor
+    /// (`to_eof`), with OUT_DONE, OUT_EOF and, at the end of the chain, OUT_TOTAL_EOF.
+    fn drain_dma_out(&mut self, ch: usize, data: &mut Vec<u8>, to_eof: bool) {
+        let mut walk = DescriptorWalk::new(GDMA_DESCRIPTOR_STEP_BUDGET);
+        loop {
+            let c = self.periph.gdma.out[ch];
+            if !c.running || c.desc == 0 { break; }
+            let Ok((_, d)) = walk.read(self, c.desc) else { self.fail_dma_out(ch); break };
+            let (length, eof, buf, next) = (d.length, d.eof, d.buf, d.next);
+            let remaining = length.saturating_sub(c.buf_pos) as usize;
+            if remaining > 0 && self.append_mapped_bytes(buf.wrapping_add(c.buf_pos), remaining, data).is_err() {
+                self.fail_dma_out(ch); break;
+            }
+            let ch_ref = &mut self.periph.gdma.out[ch];
+            ch_ref.int_raw |= 1 << 0;
+            if eof { ch_ref.int_raw |= 1 << 1; ch_ref.eof_desc = c.desc; }
+            if next == 0 { ch_ref.running = false; ch_ref.desc = 0; ch_ref.int_raw |= 1 << 3; break; }
+            ch_ref.desc = next; ch_ref.buf_pos = 0;
+            if eof && to_eof { break; }
+        }
+    }
+
+    /// UHCI0 between UART0 and GDMA trigger 2, in the transparent mode esp-hal sets (no SLIP, header
+    /// or CRC). OUT descriptors go to UART0's TX pin at once; received bytes go to the IN channel, an
+    /// EOF closing the descriptor every PKT_THRES bytes (LEN_EOF_EN) and when the line has been idle
+    /// for a millisecond (UART_IDLE_EOF_EN; the silicon's idle threshold is a few bit times, the
+    /// board models send bursts at the wire's pace).
+    pub(super) fn dma_uhci_step(&mut self) {
+        let conf0 = self.periph.uhci.conf0();
+        if conf0 & crate::periph::Uhci::UART0_CE == 0 || conf0 & crate::periph::Uhci::FRAMED != 0 { return; }
+        if let Some(ch) = self.periph.gdma.out_channel_for(2) {
+            let mut data = Vec::new();
+            self.drain_dma_out(ch, &mut data, false);
+            if self.uart_pins && !data.is_empty() {
+                let route = self.periph.uart_route(0);
+                for b in data { self.board.uart_tx(self.cycles, route, b); }
+            }
+            self.irq_dirty = true;
+        }
+        let Some(ch) = self.periph.gdma.in_channel_for(2) else { return };
+        let len_eof = (conf0 & crate::periph::Uhci::LEN_EOF_EN != 0).then(|| self.periph.uhci.pkt_thres()).filter(|&n| n != 0);
+        let data = self.periph.uart[0].take_rx();
+        if !data.is_empty() {
+            let _ = self.scatter_dma_in(ch, &data, len_eof, false);
+            self.periph.uhci.last_rx = self.cycles;
+            self.periph.uhci.idle_pending = conf0 & crate::periph::Uhci::IDLE_EOF_EN != 0;
+        } else if self.periph.uhci.idle_pending && self.cycles - self.periph.uhci.last_rx >= crate::periph::CPU_HZ / 1000 {
+            self.periph.uhci.idle_pending = false;
+            let _ = self.scatter_dma_in(ch, &[], len_eof, true);
+        }
     }
 
     fn scatter_dma_in(&mut self, ch: usize, data: &[u8], eof_bytes: Option<u32>, finish: bool) -> Result<(), ()> {

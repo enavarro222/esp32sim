@@ -374,6 +374,31 @@ impl Device for Pcnt {
     fn write(&mut self, off: u32, v: u32) -> WriteEffect { Pcnt::write(self, off, v); WriteEffect::NONE }
     fn irq_sources(&self) -> u64 { self.irq() as u64 }
 }
+/// UHCI0: UART over GDMA (trigger 2). Only the transparent mode esp-hal uses (SEPER_EN, HEAD_EN and
+/// CRC_REC_EN cleared): the bus moves UART0's received bytes into the IN channel and the OUT
+/// channel's bytes to its TX pin (`bus::dma`). Registers from IDF v5.5.4
+/// components/soc/esp32s3/register/soc/uhci_reg.h.
+pub struct Uhci { pub ram: RegRam, pub last_rx: u64, pub idle_pending: bool }
+impl Uhci {
+    pub const UART0_CE: u32 = 1 << 2;
+    pub const IDLE_EOF_EN: u32 = 1 << 8;
+    pub const LEN_EOF_EN: u32 = 1 << 9;
+    /// SEPER_EN, HEAD_EN, CRC_REC_EN: SLIP framing, a packet header, a CRC.
+    pub const FRAMED: u32 = (1 << 5) | (1 << 6) | (1 << 7);
+    pub fn new() -> Self {
+        let mut ram = RegRam::new();
+        ram.write(0x0, Self::LEN_EOF_EN | Self::FRAMED);   // CONF0 reset
+        ram.write(0x80, 0x80);                             // PKT_THRES reset: 128 bytes
+        Uhci { ram, last_rx: 0, idle_pending: false }
+    }
+    pub fn conf0(&self) -> u32 { self.ram.read(0x0) }
+    pub fn pkt_thres(&self) -> u32 { self.ram.read(0x80) & 0xfff }
+}
+impl Default for Uhci { fn default() -> Self { Self::new() } }
+impl Device for Uhci {
+    fn read(&mut self, off: u32) -> u32 { self.ram.read(off) }
+    fn write(&mut self, off: u32, v: u32) -> WriteEffect { self.ram.write(off, v); WriteEffect::NONE }
+}
 impl Device for LcdCam {
     fn read(&mut self, off: u32) -> u32 { LcdCam::read(self, off) }
     fn write(&mut self, off: u32, v: u32) -> WriteEffect { LcdCam::write(self, off, v); WriteEffect::NONE }
@@ -419,6 +444,7 @@ pub struct Peripherals {
     pub spi1: SpiMem,
     pub i2c: [crate::i2c::I2c; 2],
     pub lcd_cam: LcdCam,
+    pub uhci: Uhci,
     pub spi2: GpSpi,
     /// GP-SPI3 (Arduino `HSPI`), the same register block as SPI2, at DR_REG_SPI3_BASE 0x60025000
     /// (IDF v5.5.5 components/soc/esp32s3/register/soc/reg_base.h:39; v4.4.8 soc.h:74).
@@ -480,6 +506,7 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Systimer, 15), 
     0x13 "I2C0" optional (i2c[0]) => [SRC_I2C0];
     0x27 "I2C1" optional (i2c[1]) => [SRC_I2C1];
     0x41 "LCD_CAM" (lcd_cam) => [SRC_LCD_CAM];
+    0x14 "UHCI0" (uhci) => [];
     0x24 "SPI2" (spi2) => [SRC_SPI2];
     0x25 "SPI3" (spi3) => [SRC_SPI3];
     0x17 "PCNT" (pcnt) => [SRC_PCNT];
@@ -519,7 +546,7 @@ impl Peripherals {
             usb: UsbSerialJtag::new(CPU_HZ), uart: [Uart::new(UartLayout::S3), Uart::new(UartLayout::S3), Uart::new(UartLayout::S3)], systimer: Systimer::new(),
             timg: [TimerGroup::new(), TimerGroup::new()], intmatrix: IntMatrix::new(), gpio: Gpio::new(), ledc: Ledc::new(LedcLayout::S3), mcpwm: [Mcpwm::new(160, 9), Mcpwm::new(166, 9)], rtc: RtcCntl::new(),
             efuse: Efuse::new(mac), system: SystemRegs::new(0x30), extmem: Extmem::new(), spi0: SpiMem::new(false), spi1: SpiMem::new(true),
-            i2c: [crate::i2c::I2c::new(), crate::i2c::I2c::new()], lcd_cam: LcdCam::new(), spi2: GpSpi::new(), spi3: GpSpi::with_host(3), pcnt: Pcnt::new(), wifi: WifiMac::new(), fe: FeIq { word: 0 },
+            i2c: [crate::i2c::I2c::new(), crate::i2c::I2c::new()], lcd_cam: LcdCam::new(), uhci: Uhci::new(), spi2: GpSpi::new(), spi3: GpSpi::with_host(3), pcnt: Pcnt::new(), wifi: WifiMac::new(), fe: FeIq { word: 0 },
             aes: Aes::new(), rsa: Rsa::new(), sha: Sha::new(), wdev: Wdev::new(), i2c_mst: I2cMst::new(), gdma: Gdma::new(), i2s0: I2s::new(CPU_HZ), i2s1: I2s::new(CPU_HZ), rmt: Rmt::new(CPU_HZ),
             io_mux: RegRam::new(), misc: Misc::new(), fake_reads: std::env::var("ESP_EMU_FAKE_READ").ok().map(|v| v.split(',').filter_map(|e| { let mut p = e.split(':'); let a = u32::from_str_radix(p.next()?.trim_start_matches("0x"), 16).ok()?; let o = u32::from_str_radix(p.next().unwrap_or("0").trim_start_matches("0x"), 16).ok()?; let m = u32::from_str_radix(p.next().unwrap_or("ffffffff").trim_start_matches("0x"), 16).ok()?; Some((a, (o, m))) }).collect()).unwrap_or_default(),
             clock: Self::new_clock(),
