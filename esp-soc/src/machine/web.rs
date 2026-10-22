@@ -175,6 +175,10 @@ impl<S: Soc> Machine<S> {
                     let n = v.strip_prefix("0x").map(|h| u32::from_str_radix(h, 16).ok()).unwrap_or_else(|| v.parse().ok());
                     if let Some(n) = n { self.bus.set_strap(n); }
                 }
+                "board_cmd" => {
+                    let (cycle, line) = (self.bus.cycles(), field("line").unwrap_or_default());
+                    if let Err(error) = self.bus.board().command(cycle, &line) { eprintln!("[board] {error}"); }
+                }
                 // the page's Restart on a native run: the board's reset button
                 "reset" if self.web_restart => { self.button_reset = true; self.bus.request_reset(esp_periph::RST_POWERON); *self.bus.irq_dirty() = true; }
                 "touch" => { let x: u16 = field("x").and_then(|v| v.parse().ok()).unwrap_or(0); let y: u16 = field("y").and_then(|v| v.parse().ok()).unwrap_or(0);
