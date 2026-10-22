@@ -155,6 +155,10 @@ impl<S: Soc> Machine<S> {
                         _ => self.bus.serial_input(data.as_bytes()),
                     }
                 }
+                "board_cmd" => {
+                    let (cycle, line) = (self.bus.cycles(), field("line").unwrap_or_default());
+                    if let Err(error) = self.bus.board().command(cycle, &line) { eprintln!("[board] {error}"); }
+                }
                 // the page's Restart on a native run: the board's reset button
                 "reset" if self.web_restart => { self.button_reset = true; self.bus.request_reset(esp_periph::RST_POWERON); *self.bus.irq_dirty() = true; }
                 "touch" => { let x: u16 = field("x").and_then(|v| v.parse().ok()).unwrap_or(0); let y: u16 = field("y").and_then(|v| v.parse().ok()).unwrap_or(0);
