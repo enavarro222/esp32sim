@@ -624,6 +624,18 @@ fn lcd_i8080_transfer_runs_at_lcd_start_and_reaches_the_board() {
     assert_eq!(bus.periph.lcd_cam.read(0x14) & (1 << 27), 0, "LCD_START cleared");
     assert_eq!(bus.periph.lcd_cam.read(0x68) & 2, 2, "LCD_TRANS_DONE");
     assert!(!bus.periph.gdma.out[0].running);
+    // a transfer ends at its EOF descriptor, not at the end of the chain
+    seen.lock().unwrap().clear();
+    let mut bus2 = bus_with_out(5, 4, DESC + 16);
+    bus2.board = Box::new(Probe(seen.clone()));
+    bus2.write32(DESC, (1 << 31) | (1 << 30) | (2 << 12) | 2).unwrap();
+    bus2.write32(INPUT, 0x0000_0036).unwrap();
+    bus2.write32(DESC + 16, (1 << 31) | (1 << 30) | (2 << 12) | 2).unwrap();
+    bus2.write32(DESC + 20, INPUT + 4).unwrap();
+    bus2.periph.lcd_cam.write(0x14, (1 << 27) | (1 << 24) | (1 << 23) | (1 << 13));
+    bus2.dma_i80_step();
+    assert_eq!(*seen.lock().unwrap(), [(None, vec![0x36, 0x00], true)]);
+    assert_eq!(bus2.periph.gdma.out[0].desc, DESC + 16);
     // RGB mode keeps its own engine: no i8080 transfer
     bus.periph.lcd_cam.write(0x1c, 1 << 31);
     bus.periph.lcd_cam.write(0x14, 1 << 27);

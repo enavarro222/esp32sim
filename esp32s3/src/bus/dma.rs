@@ -712,6 +712,9 @@ impl SocBus {
                     if eof { ch_ref.int_raw |= 1 << 1; ch_ref.eof_desc = c.desc; }
                     if next == 0 { ch_ref.running = false; ch_ref.desc = 0; ch_ref.int_raw |= 1 << 3; break; }
                     ch_ref.desc = next; ch_ref.buf_pos = 0;
+                    // the LCD ends the transfer at the EOF descriptor (IDF's esp_lcd chains one
+                    // transaction after another with LCD_ALWAYS_OUT_EN)
+                    if eof { break; }
                 }
             }
         }
