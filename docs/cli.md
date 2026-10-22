@@ -166,6 +166,15 @@ map to installed PSRAM; flash, invalid mappings and out-of-range packets are
 rejected. The controller task trampoline and its receive buffer still require
 internal controller BSS.
 
+On the S3, esp-radio firmware (esp-hal, esp-rtos; no ESP-IDF) is recognised by `btdm_controller_init`
+without `esp_bt_controller_init`: the hooks take the blob's `btdm_controller_init`/`_enable` and
+`API_vhci_host_*`, the task is created by the `task_create` of esp-radio's OSI table
+(`G_OSI_FUNCS`) and sleeps in `__esp_radio_vTaskDelay`; there is no controller BSS, so the packet
+buffer lives in the task's own frame. Validated with esp-radio 1.0.0-beta.1 and trouble-host 0.7
+(the open CC600 firmware): advertising, connection, discovery. Besides giving the guest a
+controller, this lets its host stack finish initialising: with the controller stubbed out instead,
+trouble-host polls for it forever and the CPU never idles.
+
 `[ble]` output reports advertising data and discovered GATT handles. Script commands
 use seconds like the other script actions. For example:
 

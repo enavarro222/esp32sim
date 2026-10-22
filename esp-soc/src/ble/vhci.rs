@@ -1,4 +1,8 @@
 //! Controller lifecycle and legacy VHCI packet delivery in a guest FreeRTOS task.
+//!
+//! Two guest stacks: ESP-IDF (`esp_bt_controller_*`, `esp_vhci_host_*`, FreeRTOS) and esp-radio
+//! (`btdm_controller_*`, `API_vhci_host_*`, the task functions of its OSI table and
+//! `__esp_radio_vTaskDelay`). The VHCI callbacks have the same layout in both.
 use emu_core::Core;
 use std::collections::HashMap;
 
@@ -30,8 +34,35 @@ pub const XTENSA_CODE: &[u8] = &[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00, 0x90, 0x00, 0x00,
 ];
 
+// The esp-radio variant, same offsets and literals. esp-radio's `task_create` stores the task
+// handle, so a15 points into the init frame; there is no controller BSS, so the task keeps the
+// packet buffer in its own frame and hands it to poll.
+// +48: entry a1,64; l32r a8,create; l32r a10,task; l32r a11,name; l32r a12,stack; movi a13,0;
+// movi a14,23; addi a15,a1,16; movi a9,0; s32i a9,a1,0; callx8 a8; l32r a8,created; callx8 a8;
+// mov a2,a10; retw.
+// +112: entry a1,640; again: l32r a8,poll; addi a10,a1,32; callx8 a8; beqz a10,sleep; mov a8,a10;
+// addi a10,a1,32; l32i a11,a10,0; addi a10,a10,16; callx8 a8; j again; sleep: movi a10,1;
+// l32r a8,delay; callx8 a8; j again.
+// +176/+192: entry a1,32; retw.
+pub const XTENSA_RADIO_CODE: &[u8] = &[
+    0x36, 0x81, 0x00, 0x81, 0xf4, 0xff, 0xa1, 0xf4, 0xff, 0xb1, 0xf4, 0xff, 0xc1, 0xf9, 0xff, 0xd2, 0xa0, 0x00, 0xe2,
+    0xa0, 0x17, 0xf2, 0xc1, 0x10, 0x92, 0xa0, 0x00, 0x92, 0x61, 0x00, 0xe0, 0x08, 0x00, 0x81, 0xf1, 0xff, 0xe0, 0x08,
+    0x00, 0xa0, 0x2a, 0x20, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x01, 0x05, 0x81, 0xe8, 0xff, 0xa2, 0xc1, 0x20, 0xe0, 0x08, 0x00,
+    0x16, 0x1a, 0x01, 0xa0, 0x8a, 0x20, 0xa2, 0xc1, 0x20, 0xb2, 0x2a, 0x00, 0xa2, 0xca, 0x10, 0xe0, 0x08, 0x00, 0x46,
+    0xf8, 0xff, 0xa2, 0xa0, 0x01, 0x81, 0xdf, 0xff, 0xe0, 0x08, 0x00, 0x46, 0xf5, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00, 0x90, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00, 0x90, 0x00, 0x00,
+];
+/// Byte offset of `task_create` in esp-radio's `osi_funcs_s` (magic, version, 23 functions).
+pub const OSI_TASK_CREATE: u32 = 100;
+/// Packet buffer offset in the esp-radio task's frame.
+pub const FRAME_BUFFER: u32 = 32;
+
 pub struct Abi {
     pub code: &'static [u8],
+    /// The esp-radio variant of `code`, where validated.
+    pub radio_code: Option<&'static [u8]>,
     pub ram: std::ops::Range<u32>,
     pub hz: u64,
 }
@@ -75,6 +106,8 @@ pub struct Ble {
     pub create: u32,
     pub delay: u32,
     pub buffer: u32,
+    /// esp-radio: its OSI table, where `task_create` is read at install; 0 for ESP-IDF.
+    pub osi: u32,
     pub status: u32,
     pub callbacks: [u32; 2],
     pub send_ready: bool,
@@ -89,6 +122,9 @@ impl Ble {
     }
 
     pub fn enable(&mut self, symbols: &HashMap<String, u32>, init_size: u32, abi: &Abi) -> Result<(), String> {
+        if !symbols.contains_key("esp_bt_controller_init") && symbols.contains_key("btdm_controller_init") {
+            return self.enable_radio(symbols, init_size, abi);
+        }
         let get = |name: &str| symbols.get(name).copied().ok_or_else(|| format!("BLE requires ELF symbol {name}"));
         let entry = get("esp_bt_controller_init")?;
         let init = entry.checked_add(3).ok_or("BLE invalid init address")? & !3;
@@ -134,6 +170,36 @@ impl Ble {
         Ok(())
     }
 
+    /// esp-radio over esp-rtos: hooks the blob's `btdm_controller_*` and `API_vhci_host_*`.
+    fn enable_radio(&mut self, symbols: &HashMap<String, u32>, init_size: u32, abi: &Abi) -> Result<(), String> {
+        let get = |name: &str| symbols.get(name).copied().ok_or_else(|| format!("BLE requires ELF symbol {name}"));
+        let code = abi.radio_code.ok_or("BLE: esp-radio firmware is unsupported on this chip")?;
+        let entry = get("btdm_controller_init")?;
+        let init = entry.checked_add(3).ok_or("BLE invalid init address")? & !3;
+        if entry.checked_add(init_size).is_none_or(|end| end.saturating_sub(init) < INIT + code.len() as u32) {
+            return Err("BLE controller init has no room for the guest task trampoline".into());
+        }
+        // the mangled name of esp_radio::ble::btdm::ble_os_adapter_chip_specific::G_OSI_FUNCS
+        let osi = symbols.iter().find(|(name, _)| name.ends_with("11G_OSI_FUNCS")).map(|(_, &a)| a)
+            .ok_or("BLE requires ELF symbol G_OSI_FUNCS (esp-radio)")?;
+        let mut next = Self { entry, init, osi, delay: get("__esp_radio_vTaskDelay")?, ..Self::default() };
+        for (name, kind) in [
+            ("btdm_controller_init", Hook::Init),
+            ("btdm_controller_enable", Hook::Enable),
+            ("API_vhci_host_register_callback", Hook::Register),
+            ("API_vhci_host_check_send_available", Hook::Available),
+            ("API_vhci_host_send_packet", Hook::Send),
+        ] { next.kinds.insert(get(name)?, kind); }
+        for (name, kind) in [("btdm_controller_disable", Hook::Disable), ("btdm_controller_deinit", Hook::Deinit)] {
+            if let Some(&address) = symbols.get(name) { next.kinds.insert(address, kind); }
+        }
+        next.kinds.insert(init + POLL, Hook::Poll);
+        next.kinds.insert(init + CREATED, Hook::Created);
+        next.hooks = next.kinds.keys().copied().collect();
+        *self = next;
+        Ok(())
+    }
+
     pub fn reset(&mut self) {
         self.session.reset();
         self.status = 0;
@@ -159,11 +225,20 @@ impl Ble {
 pub fn install<B: VhciBus>(bus: &mut B) -> Result<(), String> {
     let abi = B::abi();
     let b = bus.ble();
-    let (entry, init, buffer) = (b.entry, b.init, b.buffer);
-    let literals = [b.create, init + TASK, buffer + 4, b.delay, init + POLL, init + CREATED, buffer, 4096];
+    let (entry, init, buffer, osi, delay) = (b.entry, b.init, b.buffer, b.osi, b.delay);
+    let (code, literals) = if osi == 0 {
+        (abi.code, [b.create, init + TASK, buffer + 4, delay, init + POLL, init + CREATED, buffer, 4096])
+    } else {
+        let create = bus.read32_unpriced(osi + OSI_TASK_CREATE).map_err(|_| "BLE cannot read the OSI table")?;
+        if !bus.valid_callback(create) { return Err("BLE OSI task_create does not match the guest calling convention".into()); }
+        // an empty task name: a zero byte of the table (its version is 0x0001000B)
+        let name = (osi..osi + 8).find(|&a| bus.read8_unpriced(a) == Ok(0)).ok_or("BLE found no task name")?;
+        bus.ble().create = create;
+        (abi.radio_code.unwrap_or(abi.code), [create, init + TASK, name, delay, init + POLL, init + CREATED, 0, 8192])
+    };
     if !bus.valid_callback(entry) { return Err("BLE controller init does not match the guest calling convention".into()); }
     if let Some(offset) = bus.flash_offset(init + 4) {
-        let len = INIT as usize + abi.code.len() - 4;
+        let len = INIT as usize + code.len() - 4;
         if bus.flash_offset(init + 4 + len as u32 - 1) != Some(offset + len - 1) {
             return Err("BLE controller init crosses a noncontiguous flash mapping".into());
         }
@@ -176,8 +251,8 @@ pub fn install<B: VhciBus>(bus: &mut B) -> Result<(), String> {
         }
     }
     for (i, value) in literals.into_iter().enumerate() { bus.load_bytes(init + 4 + i as u32 * 4, &value.to_le_bytes())?; }
-    bus.load_bytes(init + INIT, abi.code)?;
-    bus.load_bytes(buffer + 4, b"vhci\0")?;
+    bus.load_bytes(init + INIT, code)?;
+    if osi == 0 { bus.load_bytes(buffer + 4, b"vhci\0")?; }
     Ok(())
 }
 
@@ -287,9 +362,11 @@ pub fn intercept<C: Core, B: VhciBus>(cpu: &mut C, bus: &mut B, redirect: impl F
                 cpu.return_from_stub(bus, 0);
                 return true;
             }
-            if bus.ble().status == 2 && bus.ble().callbacks[1] != 0 {
+            // esp-radio: the task's frame buffer, passed as the argument
+            let buffer = if bus.ble().osi == 0 { bus.ble().buffer } else { arg };
+            let in_ram = abi.ram.contains(&buffer) && buffer.checked_add(BUFFER_SIZE).is_some_and(|end| end <= abi.ram.end);
+            if bus.ble().status == 2 && bus.ble().callbacks[1] != 0 && in_ram {
                 if let Some(packet) = bus.ble().session.pop_packet() {
-                    let buffer = bus.ble().buffer;
                     if packet.len() <= (BUFFER_SIZE - 16) as usize
                         && bus.load_bytes(buffer, &(packet.len() as u32).to_le_bytes()).is_ok()
                         && bus.load_bytes(buffer + 16, &packet).is_ok()

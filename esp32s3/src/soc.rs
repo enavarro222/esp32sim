@@ -58,7 +58,11 @@ impl Soc for S3 {
 }
 
 impl esp_soc::SocBus for SocBus {
-    fn enable_ble(&mut self, elf: &esp_soc::elf::Elf) -> Result<(), String> { self.ble.enable(&elf.by_name, elf.symbol_sizes.get("esp_bt_controller_init").copied().unwrap_or(0), &<Self as esp_soc::ble::vhci::VhciBus>::abi()) }
+    fn enable_ble(&mut self, elf: &esp_soc::elf::Elf) -> Result<(), String> {
+        // ESP-IDF's controller init, or esp-radio's (the blob's)
+        let init = ["esp_bt_controller_init", "btdm_controller_init"].into_iter().find_map(|n| elf.symbol_sizes.get(n)).copied();
+        self.ble.enable(&elf.by_name, init.unwrap_or(0), &<Self as esp_soc::ble::vhci::VhciBus>::abi())
+    }
     fn ble_enabled(&self) -> bool { !self.ble.hooks.is_empty() }
     fn ble_pending_commands(&self) -> usize { self.ble.session.pending_commands() }
     fn ble_command(&mut self, command: &str) -> Result<(), String> { self.ble.command(command, self.cycles, periph::CPU_HZ) }
