@@ -454,6 +454,15 @@ impl SocBus {
     #[inline]
     fn is_periph(addr: u32) -> bool { (PERIPH_BASE..PERIPH_END).contains(&addr) }
 
+    /// The peripheral bus past the last device, up to 0x60FF_FFFF, where no memory sits (RTC FAST
+    /// memory does, at 0x600F_E000): an aligned word reads 0 and a write is dropped, without an
+    /// exception. Inferred from silicon: with
+    /// `CONFIG_ESP_CONSOLE_NONE`, IDF selects ROM print channel 255 (`uart_tx_switch(255)`) and
+    /// every `esp_rom_printf` makes the ROM's `uart_tx_one_char_uart` poll 0x60FF_E01C and write
+    /// 0x60FF_E000; firmware built that way runs on the chip.
+    #[inline]
+    fn is_unassigned_periph(addr: u32) -> bool { addr & 3 == 0 && (PERIPH_END..0x6100_0000).contains(&addr) }
+
     fn periph_read(&mut self, addr: u32) -> u32 {
         if (MMU_TABLE..MMU_TABLE + (MMU_ENTRIES as u32) * 4).contains(&addr) {
             return self.mmu[((addr - MMU_TABLE) >> 2) as usize];
@@ -689,6 +698,7 @@ impl SocBus {
         match self.lookup(addr) {
             Some(e) if e.hi - addr >= 4 => { if CPU { self.price_cached_data(e, addr, 4, false); } let o = e.off as usize + (addr - e.lo) as usize; Ok(u32::from_le_bytes(self.buf(e.src as u8)[o..o + 4].try_into().unwrap())) }
             Some(_) => Ok(u32::from_le_bytes([self.read8_access::<CPU>(addr)?, self.read8_access::<CPU>(addr + 1)?, self.read8_access::<CPU>(addr + 2)?, self.read8_access::<CPU>(addr + 3)?])),
+            None if Self::is_unassigned_periph(addr) => Ok(0),
             None => { self.last_fault = Some((addr, false)); Err(Fault::Unmapped) }
         }
     }
@@ -721,6 +731,7 @@ impl SocBus {
         match self.lookup(addr) {
             Some(e) if e.writable != 0 && e.hi - addr >= 4 => { if CPU { self.price_cached_data(e, addr, 4, true); } let rel = (addr - e.lo) as usize; let o = e.off as usize + rel; self.buf_mut(e.src as u8)[o..o + 4].copy_from_slice(&v.to_le_bytes()); if e.code != 0 { self.bump(e.vbase, rel, 4); } Ok(()) }
             Some(e) if e.writable != 0 => { let b = v.to_le_bytes(); for i in 0..4 { self.write8_access::<CPU>(addr + i, b[i as usize])?; } Ok(()) }
+            None if Self::is_unassigned_periph(addr) => Ok(()),
             _ => { self.last_fault = Some((addr, true)); Err(Fault::Prohibited) }
         }
     }
