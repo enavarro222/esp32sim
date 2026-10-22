@@ -161,6 +161,7 @@ async function runManifest(name) {
   for (const [off, rel] of Object.entries(m.flash_at || {})) withBytes(new Uint8Array(file(rel)), (p, n) => w.esp32sim_load_at(emu, Number(off) >>> 0, p, n));
   for (const s of m.stubs || []) { const [sym, ...values] = s.split('='); const val = values.length ? values.join('=') : undefined; const name = (m.symbols || {})[sym] || sym;   // as the page: a symbols map resolves a stub without the ELF
     if (withBytes(enc.encode(name + (val === undefined ? '' : '=' + val)), (p, n) => w.esp32sim_stub_spec(emu, p, n)) !== 0) throw new Error('invalid stub: ' + s); }
+  if (m.ble && withBytes(new Uint8Array(file([].concat(m.files.elf)[0])), (p, n) => w.esp32sim_ble_virtual(emu, p, n)) !== 0) throw new Error(`virtual BLE failed: ${logs.join(' | ')}`);
   if (m.wifi && withBytes(enc.encode(m.wifi), (p, n) => w.esp32sim_wifi(emu, p, n)) !== 0) throw new Error('invalid WiFi configuration');
   w.esp32sim_set_jit(emu, process.env.ESP32SIM_NO_WASM_JIT ? 0 : 1);
   if (w.esp32sim_boot(emu, 0) !== 0) throw new Error(`boot failed: ${logs.join(' | ')}`);
