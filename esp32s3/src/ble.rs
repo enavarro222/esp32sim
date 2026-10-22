@@ -13,7 +13,7 @@ pub fn intercept(cpu: &mut xtensa_lx7::Cpu, bus: &mut SocBus) -> bool {
 }
 
 impl VhciBus for SocBus {
-    fn abi() -> Abi { Abi { code: CODE, ram: DRAM_LOW..DRAM_HIGH, hz: crate::periph::CPU_HZ } }
+    fn abi() -> Abi { Abi { code: CODE, radio_code: Some(esp_soc::ble::vhci::XTENSA_RADIO_CODE), ram: DRAM_LOW..DRAM_HIGH, hz: crate::periph::CPU_HZ } }
     fn ble(&mut self) -> &mut Ble { &mut self.ble }
     fn valid_callback(&mut self, pc: u32) -> bool { self.fetch(pc).is_ok_and(|bytes| decode(pc, bytes).op == Op::Entry) }
     fn flash_offset(&mut self, pc: u32) -> Option<usize> { self.flash_off(pc) }
@@ -229,6 +229,84 @@ mod tests {
             assert_eq!(bus.ble.session.pop_packet().is_some(), len == 496);
         }
     }
+    /// esp-radio over esp-rtos: the blob's names, the OSI table's `task_create`, `__esp_radio_vTaskDelay`.
+    fn radio_fixture() -> (SocBus, HashMap<String, u32>) {
+        let mut bus = SocBus::new(0x400000, 0, [0; 6]);
+        let osi = DRAM_LOW + 0x3000;
+        let symbols: HashMap<String, u32> = [
+            ("btdm_controller_init", BASE),
+            ("btdm_controller_enable", BASE + 0x610),
+            ("API_vhci_host_check_send_available", BASE + 0x620),
+            ("API_vhci_host_send_packet", BASE + 0x630),
+            ("API_vhci_host_register_callback", BASE + 0x640),
+            ("__esp_radio_vTaskDelay", BASE + 0x500),
+            ("_RNvNtNtNtCsX_9esp_radio3ble4btdm27ble_os_adapter_chip_specific11G_OSI_FUNCS", osi),
+        ]
+        .into_iter()
+        .map(|(n, a)| (n.into(), a))
+        .collect();
+        for &pc in symbols.values().filter(|&&pc| pc >= BASE) { bus.load_bytes(pc, &[0x36, 0x41, 0, 0x90, 0, 0]).unwrap(); }
+        for pc in [SEND_CB, RECV_CB, BASE + 0x400] { bus.load_bytes(pc, &[0x36, 0x41, 0, 0x90, 0, 0]).unwrap(); }
+        // magic, version 0x0001000B (its zero bytes name the task), then task_create at +100
+        bus.load_bytes(osi, &[0xad, 0xbe, 0xde, 0xfa, 0x0b, 0x00, 0x01, 0x00]).unwrap();
+        bus.load_bytes(osi + 100, &(BASE + 0x400).to_le_bytes()).unwrap();
+        bus.ble.enable(&symbols, 0x400, &SocBus::abi()).unwrap();
+        (bus, symbols)
+    }
+
+    #[test]
+    fn esp_radio_trampoline_creates_the_task_through_the_osi_table() {
+        let (mut bus, _) = radio_fixture();
+        let mut cpu = caller(BASE, DRAM_LOW);
+        assert!(intercept(&mut cpu, &mut bus));
+        let mut created = false;
+        for _ in 0..100 {
+            if cpu.pc == RETURN { break; }
+            if cpu.pc == BASE + 0x400 {
+                let args: Vec<u32> = (0..6).map(|n| cpu.arg(&mut bus, n)).collect();
+                assert_eq!(args[..5], [BASE + TASK, DRAM_LOW + 0x3005, 8192, 0, 23]);
+                assert_eq!(bus.read8_unpriced(args[1]).unwrap(), 0, "an empty task name");
+                assert_eq!(args[5], cpu.get_ar(1) + 16, "the handle goes to the init frame");
+                assert_eq!(bus.read32_unpriced(cpu.get_ar(1)).unwrap(), 0, "core 0");
+                cpu.return_from_stub(&mut bus, 1);
+                created = true;
+            } else if !intercept(&mut cpu, &mut bus) { assert!(cpu.step(&mut bus).trap().is_none()); }
+        }
+        assert!(created);
+        assert_eq!((cpu.pc, cpu.get_ar(10), bus.ble.status), (RETURN, 0, 1));
+    }
+
+    #[test]
+    fn esp_radio_task_keeps_the_packet_in_its_frame() {
+        let (mut bus, _) = radio_fixture();
+        install(&mut bus).unwrap();
+        bus.ble.status = 2;
+        bus.ble.callbacks = [SEND_CB, RECV_CB];
+        bus.ble.send_ready = true;
+        bus.ble.session.send(&[1, 3, 12, 0]);
+        let mut cpu = caller(BASE + TASK, 0);
+        let (mut received, mut ready, mut delayed) = (false, false, false);
+        for _ in 0..100 {
+            if cpu.pc == RECV_CB {
+                let (ptr, len) = (cpu.arg(&mut bus, 0), cpu.arg(&mut bus, 1));
+                let bytes: Vec<u8> = (0..len).map(|i| bus.read8_unpriced(ptr + i).unwrap()).collect();
+                assert_eq!(bytes, [4, 14, 4, 1, 3, 12, 0]);
+                assert!(ptr > 0x3fcf_0000 - 640 && ptr < 0x3fcf_0000, "inside the task frame");
+                cpu.return_from_stub(&mut bus, 0);
+                received = true;
+            } else if cpu.pc == SEND_CB {
+                cpu.return_from_stub(&mut bus, 0);
+                ready = true;
+            } else if cpu.pc == BASE + 0x500 {
+                assert_eq!(cpu.arg(&mut bus, 0), 1);
+                delayed = true;
+                if ready { break; }
+                cpu.return_from_stub(&mut bus, 0);
+            } else if !intercept(&mut cpu, &mut bus) { assert!(cpu.step(&mut bus).trap().is_none()); }
+        }
+        assert!(received && ready && delayed);
+    }
+
     #[test]
     fn vhci_accepts_mapped_psram_packets_without_accepting_flash_or_unmapped_pages() {
         use crate::bus::{DBUS_LOW, MMU_INVALID, MMU_SPIRAM};

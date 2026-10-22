@@ -16,6 +16,7 @@ impl VhciBus for SocBus {
     fn abi() -> Abi {
         Abi {
             code: CODE,
+            radio_code: None,
             ram: DRAM_LOW..DRAM_HIGH,
             hz: crate::periph::CPU_HZ,
         }
