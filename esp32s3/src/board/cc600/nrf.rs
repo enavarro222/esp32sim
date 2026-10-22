@@ -73,8 +73,9 @@ pub struct Nrf {
     pub altitude_m: f64,
     pub centi_celsius: i16,
     pub light: u16,
-    /// Last `gps_power` value: 0 off, 1 on.
+    /// Last `gps_power` value: 0 off, 1 on (a restart of a running receiver), and how many came.
     pub gps_power: u8,
+    pub gps_commands: u32,
     pub powered_off: bool,
     rx: Vec<u8>,
     wire: Wire,
@@ -92,7 +93,7 @@ impl Nrf {
     pub fn new(unix_now: i64) -> Self {
         let mut n = Nrf {
             rtc_at_zero: unix_now, battery_mv: 3950, battery_percent: 80, power_source: 1, altitude_m: 150.0,
-            centi_celsius: 2000, light: 2500, gps_power: 0, powered_off: false, rx: Vec::new(), wire: Wire::new(BAUD),
+            centi_celsius: 2000, light: 2500, gps_power: 0, gps_commands: 0, powered_off: false, rx: Vec::new(), wire: Wire::new(BAUD),
             keys: [Key::default(); 3], next: [0, RTC_FIRST, 0, 0], light_step: 0, ant_scan_end: None,
             frames_in: 0, frames_out: 0, key_events: 0,
         };
@@ -148,7 +149,7 @@ impl Nrf {
             (2, 0x10, 0xE2, grp) => {
                 match (grp, at(2), at(5)) {
                     (0x02, 0x00, 0) => self.powered_off = true,
-                    (0x02, 0x07, v) => self.gps_power = v,
+                    (0x02, 0x07, v) => { self.gps_power = v; self.gps_commands += 1; }
                     _ => {},
                 }
                 self.send(cycle, frame(5, 0x10, &ack(grp)));
