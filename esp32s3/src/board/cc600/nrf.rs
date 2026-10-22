@@ -7,17 +7,13 @@
 //! a CC600: battery and power source every 300 ms, RTC every 5 s, barometer at 5 Hz, light at
 //! 3.3 Hz. The stream runs from reset, as after the power key's power-on gesture. ANT+ answers
 //! the commands but finds no sensor.
-use std::collections::VecDeque;
 use crate::periph::CPU_HZ;
+use super::wire::Wire;
 
 pub const TX_PIN: u8 = 42;
 pub const RX_PIN: u8 = 41;
 pub const BAUD: u32 = 115_200;
-/// One 10-bit character on the wire.
-const BYTE: u64 = CPU_HZ * 10 / BAUD as u64;
 const MS: u64 = CPU_HZ / 1000;
-/// Bytes handed to the RX FIFO per poll, below its 128.
-const BURST: usize = 64;
 /// The first RTC report, once the firmware listens: at 0 it is lost and the clock waits 5 s more.
 const RTC_FIRST: u64 = 1000 * MS;
 
@@ -44,7 +40,7 @@ pub fn frame(kind: u8, cmd: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Days since 1970-01-01 to (year, month 1..=12, day) (H. Hinnant's `civil_from_days`).
-fn civil(days: i64) -> (i64, u8, u8) {
+pub(super) fn civil(days: i64) -> (i64, u8, u8) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -81,8 +77,7 @@ pub struct Nrf {
     pub gps_power: u8,
     pub powered_off: bool,
     rx: Vec<u8>,
-    out: VecDeque<u8>,
-    wire_at: u64,
+    wire: Wire,
     keys: [Key; 3],
     /// Next report of each periodic stream: battery + source, RTC, barometer, light.
     next: [u64; 4],
@@ -97,8 +92,8 @@ impl Nrf {
     pub fn new(unix_now: i64) -> Self {
         let mut n = Nrf {
             rtc_at_zero: unix_now, battery_mv: 3950, battery_percent: 80, power_source: 1, altitude_m: 150.0,
-            centi_celsius: 2000, light: 2500, gps_power: 0, powered_off: false, rx: Vec::new(), out: VecDeque::new(),
-            wire_at: 0, keys: [Key::default(); 3], next: [0, RTC_FIRST, 0, 0], light_step: 0, ant_scan_end: None,
+            centi_celsius: 2000, light: 2500, gps_power: 0, powered_off: false, rx: Vec::new(), wire: Wire::new(BAUD),
+            keys: [Key::default(); 3], next: [0, RTC_FIRST, 0, 0], light_step: 0, ant_scan_end: None,
             frames_in: 0, frames_out: 0, key_events: 0,
         };
         n.send(0, frame(4, 0x01, &[0x01, 0x01, 0, 0, 0, 0, 0, 0, 0x02, 0x13]));
@@ -108,8 +103,7 @@ impl Nrf {
     pub fn unix(&self, cycle: u64) -> i64 { self.rtc_at_zero + (cycle / CPU_HZ) as i64 }
 
     fn send(&mut self, cycle: u64, f: Vec<u8>) {
-        if self.out.is_empty() { self.wire_at = self.wire_at.max(cycle + BYTE); }
-        self.out.extend(f);
+        self.wire.send(cycle, &f);
         self.frames_out += 1;
     }
 
@@ -247,21 +241,13 @@ impl Nrf {
         }
     }
 
-    /// Bytes on the wire by `cycle`, at most [`BURST`].
-    pub fn transmit(&mut self, cycle: u64) -> Vec<u8> {
-        let mut data = Vec::new();
-        while self.wire_at <= cycle && data.len() < BURST {
-            let Some(b) = self.out.pop_front() else { break };
-            data.push(b);
-            self.wire_at += BYTE;
-        }
-        data
-    }
+    /// Bytes on the wire by `cycle`.
+    pub fn transmit(&mut self, cycle: u64) -> Vec<u8> { self.wire.transmit(cycle) }
 
     pub fn next_deadline(&self) -> u64 {
         let mut at = self.keys.iter().filter_map(|k| k.next_long).chain(self.ant_scan_end).min().unwrap_or(u64::MAX);
         if !self.powered_off { at = at.min(*self.next.iter().min().unwrap()); }
-        if !self.out.is_empty() { at = at.min(self.wire_at); }
+        if let Some(wire) = self.wire.next_deadline() { at = at.min(wire); }
         at
     }
 }
@@ -335,15 +321,6 @@ mod tests {
         n.key(MS * 2100, 0, false);
         let got: Vec<_> = drain(&mut n, MS * 2100).iter().map(key).collect();
         assert_eq!(got, [(0, KEY_LONG), (0, KEY_LONG), (0, KEY_LONG), (0, KEY_LONG_RELEASE)]);
-    }
-
-    #[test]
-    fn the_wire_paces_bytes_at_115200_baud() {
-        let mut n = Nrf::new(0);
-        n.advance(0);
-        assert!(n.transmit(0).is_empty());
-        assert_eq!(n.transmit(BYTE * 3).len(), 3);
-        assert_eq!(n.transmit(u64::MAX).len(), BURST);
     }
 
     #[test]
