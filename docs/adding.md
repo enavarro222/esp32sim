@@ -89,7 +89,9 @@ Say the new board has a BME280-style I2C sensor, a status LED on GPIO 5, and a b
    }
    ```
    Inputs are not board methods: a button is `press btn1 150` in a script (`docs/cli.md`) or a
-   click in the page, both of which end up in `gpio_set_input` on the SoC.
+   click in the page, both of which end up in `gpio_set_input` on the SoC. A key the chip does not
+   see directly (behind a co-processor) takes a pseudo pin from `named_pin` and
+   `host_input` consumes its drives before the GPIO matrix (S3).
 
 3. **Register it**: one arm in the chip's `make_board` (`"sensorboard" =>
    Some(Box::new(Sensorboard::new()))`; `esp32s3/src/board/mod.rs`, `esp32/src/board/mod.rs`,
