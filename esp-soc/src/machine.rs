@@ -14,7 +14,7 @@ mod modeled;
 mod web;
 
 #[derive(Clone, Debug)]
-pub enum ScriptAction { Gpio(u8, bool), Serial(String), Uart(usize, String), Stop, Touch(u16, u16, bool), Poke(u32, u32), TouchPad(u8, bool), Ble(String), Analog(u8, esp_periph::AnalogSource),
+pub enum ScriptAction { Gpio(u8, bool), Serial(String), Uart(usize, String), Stop, Touch(u16, u16, bool), Poke(u32, u32), TouchPad(u8, bool), Ble(String), Board(String), Analog(u8, esp_periph::AnalogSource),
     /// `waituart0 <timeout_s> <text>`: hold the rest of the script until UART0 prints `text` (or the
     /// timeout passes), then shift every later action by the time actually waited. Fields: text,
     /// timeout in cycles, the cycle the script placed it at.
@@ -1052,6 +1052,10 @@ impl<S: Soc> Machine<S> {
                 }
                 ScriptAction::WaitUart0(..) => {}
                 ScriptAction::Ble(command) => { if let Err(error) = self.bus.ble_command(&command) { eprintln!("[ble] {error}"); } }
+                ScriptAction::Board(line) => {
+                    let cycle = self.bus.cycles();
+                    if let Err(error) = self.bus.board().command(cycle, &line) { eprintln!("[board] {error}"); }
+                }
             }
         }
         stopped
@@ -1172,6 +1176,7 @@ impl<S: Soc> Machine<S> {
                     if !self.bus.ble_enabled() { return Err(format!("line {}: BLE requires --ble with the application ELF, or C3 --ble full", ln + 1)); }
                     ev.push((c, ScriptAction::Ble(rest.to_string())));
                 },
+                "board" => ev.push((c, ScriptAction::Board(rest.to_string()))),
                 "stop" => ev.push((c, ScriptAction::Stop)),
                 "waituart0" => { let mut p = rest.splitn(2, char::is_whitespace); let to: f64 = p.next().and_then(|x| x.parse().ok()).ok_or_else(|| format!("line {}: waituart0 <timeout_s> <text>", ln + 1))?;
                                  let text = p.next().unwrap_or("").trim().to_string(); if text.is_empty() { return Err(format!("line {}: waituart0 needs text", ln + 1)); }

@@ -122,6 +122,9 @@ pub trait BoardModel {
     /// the chip, such as a key behind a co-processor: true when consumed, then the GPIO matrix
     /// never sees it. Honoured by the S3.
     fn host_input(&mut self, _cycle: VirtualCycle, _pin: u8, _level: bool) -> bool { false }
+    /// A text command for a device model of the board (script `board <line>`, the UI's
+    /// `board_cmd`), such as a position for a GNSS receiver.
+    fn command(&mut self, _cycle: VirtualCycle, line: &str) -> Result<(), String> { Err(format!("this board takes no commands: {line}")) }
     /// A pin by the name scripts and the UI use (`btn1`, `sw`, ...).
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
     /// The rotary encoder's (CLK, DT) pins, if there is one.

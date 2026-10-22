@@ -65,6 +65,7 @@ Text frames:
 | `serial` | `line`, optional `src` (`usb` default, `uart0`, `uart1`) — the line plus a newline into that console's RX |
 | `key` | `src`, `data` — bytes exactly as typed, no newline added: the page's console is a terminal (click it, type; Enter is CR, Backspace DEL, arrows and Ctrl-letters their escape/control codes, paste sends the text). The **Terminal** tab (`web/terminal.js`) is a real VT100 on UART0 — xterm.js (MIT; `tools/fetch-web-vendor.sh` puts it in `web/vendor/xterm`, pinned by hash — not committed), 100×30 — so cursor movement, colours and full-screen programs render; it encodes its own keys into the same `key` message |
 | `gpio` | `pin`, `level` |
+| `board_cmd` | `line`: a command for the board's device models, as a script's `board` line ([boards.md](boards.md) lists each board's) |
 | `touch` | `x`, `y`, `down` (1 = touching); panel coordinates — a rotated panel view (the panel header's selector, `?rotate=`, or a manifest's `display_rotate`) maps its point back first |
 
 Binary frame type 3: camera picture, `w u16le, h u16le`, RGBA8888 — used by the picture
