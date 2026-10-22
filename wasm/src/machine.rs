@@ -9,6 +9,7 @@ pub(super) trait MachineApi {
     fn bus(&mut self) -> &mut dyn SocBus;
     fn load(&mut self, kind: u32, d: &[u8]) -> Result<(), String>;
     fn write_flash(&mut self, off: usize, d: &[u8]) -> Result<(), String>;
+    fn read_flash(&self, off: usize, len: usize) -> Option<&[u8]>;
     fn boot(&mut self, app_direct: bool) -> Result<(), String>;
     fn board_name(&self) -> String;
     /// The chip, as the `Soc` names it (`esp32s3`, `esp32c3`, `esp32c6`, `esp32`, `esp32p4`).
@@ -33,6 +34,7 @@ impl<S: Soc> MachineApi for Machine<S> {
         self.load_input(esp_soc::LoadKind::try_from(kind)?, d)
     }
     fn write_flash(&mut self, off: usize, d: &[u8]) -> Result<(), String> { Machine::write_flash(self, off, d) }
+    fn read_flash(&self, off: usize, len: usize) -> Option<&[u8]> { Machine::read_flash(self, off, len) }
     fn boot(&mut self, app_direct: bool) -> Result<(), String> {
         // A ROM boot can come back up through the ROM, so the page's `reset` message is honoured (run_slice reboots on
         // the reset; the flash and the strap survive). An app-mode run has no ROM to take a reset through.
@@ -101,6 +103,10 @@ impl<R: esp32p4::Revision> MachineApi for esp32p4::coproc::CoSim<R> {
     fn write_flash(&mut self, off: usize, d: &[u8]) -> Result<(), String> {
         let c6 = off as u32 & COPROC_FLASH != 0;
         if c6 { self.c6.borrow_mut().m.write_flash(off & !(COPROC_FLASH as usize), d) } else { Machine::write_flash(&mut self.p4, off, d) }
+    }
+    /// The P4's: the co-processor's flash stays behind its `RefCell`.
+    fn read_flash(&self, off: usize, len: usize) -> Option<&[u8]> {
+        if off as u32 & COPROC_FLASH != 0 { None } else { Machine::read_flash(&self.p4, off, len) }
     }
     /// Both chips from their ROMs: the co-processor has no other way in.
     fn boot(&mut self, app_direct: bool) -> Result<(), String> {

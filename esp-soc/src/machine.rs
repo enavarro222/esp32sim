@@ -287,6 +287,7 @@ impl<S: Soc> Machine<S> {
     }
 
     pub fn write_flash(&mut self, offset: usize, data: &[u8]) -> Result<(), String> { self.bus.write_flash(offset, data) }
+    pub fn read_flash(&self, offset: usize, len: usize) -> Option<&[u8]> { self.bus.read_flash(offset, len) }
 
     /// Boot the application image at flash `app_off` the way the 2nd-stage bootloader would.
     pub fn boot_app(&mut self, app_off: usize) -> Result<u32, String> {
