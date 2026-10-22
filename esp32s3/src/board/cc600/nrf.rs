@@ -17,6 +17,11 @@ const MS: u64 = CPU_HZ / 1000;
 /// The first RTC report, once the firmware listens: at 0 it is lost and the clock waits 5 s more.
 const RTC_FIRST: u64 = 1000 * MS;
 
+/// Reply to the power-on reason query: 5, the power key (the vendor firmware reads 5 and 6 as a power-on
+/// by hand, 4 as the charger starting it, which runs a charging page only).
+const POWER_ON_REASON: [u8; 8] = [0xE2, 0x02, 0, 0, 0xFF, 0x05, 0, 0xFF];
+const VERSION: [u8; 10] = [0x01, 0x01, 0, 0, 0, 0, 0, 0, 0x02, 0x13];
+
 pub const KEY_HELD: u64 = 500 * MS;
 pub const KEY_REPEAT: u64 = 250 * MS;
 pub const KEY_CLICK: u8 = 1;
@@ -97,7 +102,7 @@ impl Nrf {
             keys: [Key::default(); 3], next: [0, RTC_FIRST, 0, 0], light_step: 0, ant_scan_end: None,
             frames_in: 0, frames_out: 0, key_events: 0,
         };
-        n.send(0, frame(4, 0x01, &[0x01, 0x01, 0, 0, 0, 0, 0, 0, 0x02, 0x13]));
+        n.send(0, frame(4, 0x01, &VERSION));
         n
     }
 
@@ -144,8 +149,8 @@ impl Nrf {
         let at = |i: usize| p.get(i).copied().unwrap_or(0);
         let ack = |grp| [at(0), grp, 0x01, 0, 0, 0, 0, 0];
         match (kind, cmd, at(0), at(1)) {
-            // power-on reason query: 4, the power key
-            (1, 0x10, 0xE2, 0x02) => self.report(cycle, 0x10, [0xE2, 0x02, 0, 0, 0xFF, 0x04, 0, 0xFF]),
+            // power-on reason query
+            (1, 0x10, 0xE2, 0x02) => self.report(cycle, 0x10, POWER_ON_REASON),
             (2, 0x10, 0xE2, grp) => {
                 match (grp, at(2), at(5)) {
                     (0x02, 0x00, 0) => self.powered_off = true,
@@ -153,6 +158,11 @@ impl Nrf {
                     _ => {},
                 }
                 self.send(cycle, frame(5, 0x10, &ack(grp)));
+                // power on: the power-on reason and the version follow the acknowledge
+                if (grp, at(2), at(5)) == (0x02, 0x00, 1) {
+                    self.report(cycle, 0x10, POWER_ON_REASON);
+                    self.send(cycle, frame(4, 0x01, &VERSION));
+                }
             }
             (2, 0x00, 0x53, _) => {
                 let t = days(1900 + i64::from(at(7)), at(6), at(5) & 0x1F) * 86_400
@@ -160,6 +170,9 @@ impl Nrf {
                 self.rtc_at_zero = t - (cycle / CPU_HZ) as i64;
                 self.send(cycle, frame(5, 0x00, &ack(at(1))));
             }
+            // the vendor's slave mode query (`24 01`): byte 5 of the answer, 1 the application, else
+            // its bootloader
+            (2, 0x01, 0x24, _) => self.send(cycle, frame(5, 0x01, &[0x24, 0x01, 0xFF, 0xFF, 0x00, 0x01, 0xFF, 0xFF])),
             (2, 0x10, 0xE1, _) => {
                 let seconds = u64::from(u16::from_le_bytes([at(3), at(4)]));
                 self.ant_scan_end = Some(cycle + seconds * CPU_HZ);
@@ -294,17 +307,23 @@ mod tests {
     fn answers_the_power_on_handshake_and_takes_the_rtc() {
         let mut n = Nrf::new(0);
         drain(&mut n, 0);
-        // power_on, check_power_on_reason, set_rtc 2026-09-17 12:58:05, as the firmware builds them
-        for f in [frame(2, 0x10, &[0xE2, 0x02, 0, 0, 0, 1, 0, 0]), frame(1, 0x10, &[0xE2, 0x02, 0, 0, 0, 1, 0, 0]),
+        // the vendor's slave mode query, power_on (answered with the reason and the version),
+        // check_power_on_reason, set_rtc 2026-09-17 12:58:05, as the firmwares build them
+        for f in [frame(2, 0x01, &[0x24, 0x01, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF]),
+                  frame(2, 0x10, &[0xE2, 0x02, 0, 0, 0, 1, 0, 0]), frame(1, 0x10, &[0xE2, 0x02, 0, 0, 0, 1, 0, 0]),
                   frame(2, 0x00, &[0x53, 0xFF, 5, 58, 12, 17 | 4 << 5, 9, 126])] {
             for b in f { n.receive(10, b); }
         }
         let f = drain(&mut n, 10);
-        assert_eq!(f[0][4..9], [0x05, 0x10, 0xE2, 0x02, 0x01]);
-        assert_eq!(f[1][4..14], [0x04, 0x10, 0xE2, 0x02, 0x00, 0x00, 0xFF, 0x04, 0x00, 0xFF]);
-        assert_eq!(f[2][4], 0x05);
+        assert_eq!(f[0][4..12], [0x05, 0x01, 0x24, 0x01, 0xFF, 0xFF, 0x00, 0x01]);
+        assert_eq!(f[1][4..9], [0x05, 0x10, 0xE2, 0x02, 0x01]);
+        let reason = [0x04, 0x10, 0xE2, 0x02, 0x00, 0x00, 0xFF, 0x05, 0x00, 0xFF];
+        assert_eq!(f[2][4..14], reason);
+        assert_eq!(f[3][4..7], [0x04, 0x01, 0x01]);
+        assert_eq!(f[4][4..14], reason);
+        assert_eq!(f[5][4], 0x05);
         assert_eq!(n.unix(10 + 2 * CPU_HZ), 1_789_649_887);
-        assert_eq!(n.frames_in, 3);
+        assert_eq!(n.frames_in, 4);
     }
 
     #[test]
