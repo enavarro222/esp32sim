@@ -16,7 +16,8 @@ impl ClassicTimer {
     pub fn new(_group: usize) -> Self {
         // the classic timer group's behaviour for an alarm already passed is not compared with silicon
         let mut timer = TimerGroup::new();
-        for t in &mut timer.t { t.fires_when_reached = false; }
+        // nor its config reset value: keep the model's 0
+        for t in &mut timer.t { t.fires_when_reached = false; t.config = 0; }
         Self { timer, lact: Timer::default(), lact_rtc: 0 }
     }
 

@@ -1,7 +1,7 @@
 //! Timer group: two 54-bit timers on APB with prescaler and alarm, plus the RTC calibration register.
 use crate::device::{Device, WriteEffect};
 use crate::regram::RegRam;
-use crate::{RTC_SLOW_HZ, XTAL_HZ};
+use crate::{APB_HZ, RTC_SLOW_HZ, XTAL_HZ};
 use emu_core::ClockDomain;
 
 // ------------------------------------------------------------------ Timer group (T0/T1 + WDT + RTC calibration)
@@ -40,8 +40,7 @@ impl Timer {
             on_alarm();
             t.config &= !(1 << 10);
         }
-        let div = ((t.config >> 13) & 0xffff) as u64;
-        let div = if div == 0 { 65536 } else { div };
+        let div = t.divisor();
         t.prescale_acc += apb_ticks;
         let mut steps = t.prescale_acc / div;
         t.prescale_acc %= div;
@@ -71,12 +70,17 @@ impl Timer {
         self.fires_when_reached && self.config & ((1 << 31) | (1 << 10) | (1 << 29)) == (1 << 31) | (1 << 10)
             && if self.config & (1 << 30) != 0 { self.count >= self.alarm } else { self.count <= self.alarm }
     }
+    /// APB ticks per counter step. ESP32-S3 TRM 12.2.1: DIVIDER 0 divides by 65536, 1 and 2 by 2;
+    /// USE_XTAL (bit 9, IDF v5.5.4 timer_group_reg.h; S3 and C3) counts XTAL_CLK, half the APB rate.
+    pub fn divisor(&self) -> u64 {
+        let div = match (self.config >> 13) & 0xffff { 0 => 65536, 1 | 2 => 2, n => n as u64 };
+        if self.config & (1 << 9) != 0 { div * (APB_HZ / XTAL_HZ) } else { div }
+    }
     /// Counter steps to an armed alarm that counting will reach, and the prescaler divider.
     #[inline(always)]
     pub fn alarm_gap(&self) -> Option<(u64, u64)> {
         if self.config & (1 << 31) == 0 || self.config & (1 << 10) == 0 { return None; }   // TIMG_T0_EN, ALARM_EN
-        let div = ((self.config >> 13) & 0xffff) as u64;
-        let div = if div == 0 { 65536 } else { div };
+        let div = self.divisor();
         let steps = if self.config & (1 << 30) != 0 {
             if self.count >= self.alarm { if self.reached_one_shot() { 0 } else { return None } } else { self.alarm - self.count }
         } else if self.count <= self.alarm { if self.reached_one_shot() { 0 } else { return None } } else { self.count - self.alarm };
@@ -88,9 +92,12 @@ impl Timer {
         self.alarm_gap().map(|(steps, div)| steps.saturating_mul(div).saturating_sub(self.prescale_acc))
     }
 }
+/// TIMG_TxCONFIG at reset on the S3, C3 and C6.
+pub const CONFIG_RESET: u32 = (1 << 30) | (1 << 29) | (1 << 13);
 impl TimerGroup {
     pub fn new() -> Self {
-        let t = Timer { fires_when_reached: true, ..Timer::default() };
+        // T0CONFIG/T1CONFIG reset: INCREASE, AUTORELOAD, DIVIDER 1 (IDF v5.5.4 timer_group_reg.h)
+        let t = Timer { config: CONFIG_RESET, fires_when_reached: true, ..Timer::default() };
         TimerGroup { ram: RegRam::new(), t: [t; 2], int_raw: 0, int_ena: 0 }
     }
     pub fn tick(&mut self, apb_ticks: u64) {
