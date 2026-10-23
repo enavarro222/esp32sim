@@ -5,8 +5,10 @@
 //! the CRC; type 1 query, 2 set (ESP32 → nRF), 4 report, 5 acknowledge (nRF → ESP32). Layouts and
 //! rates from the open firmware's `crates/nrf-link` (github.com/enavarro222/opencc600), read on
 //! a CC600: battery and power source every 300 ms, RTC every 5 s, barometer at 5 Hz, light at
-//! 3.3 Hz. The stream runs from reset, as after the power key's power-on gesture. ANT+ answers
-//! the commands but finds no sensor.
+//! 3.3 Hz. The sensor stream (RTC, barometer, light) runs from reset, as after the power key's
+//! power-on gesture (a long press of key 0), and stops when the nRF cuts the ESP32's power: the
+//! power off, then on USB power the charger starting it again at once, without the stream until
+//! that gesture (opencc600 `docs/REVERSE_NOTES.md`). ANT+ answers the commands but finds no sensor.
 use crate::periph::CPU_HZ;
 use super::wire::Wire;
 
@@ -17,9 +19,13 @@ const MS: u64 = CPU_HZ / 1000;
 /// The first RTC report, once the firmware listens: at 0 it is lost and the clock waits 5 s more.
 const RTC_FIRST: u64 = 1000 * MS;
 
-/// Reply to the power-on reason query: 5, the power key (the vendor firmware reads 5 and 6 as a power-on
-/// by hand, 4 as the charger starting it, which runs a charging page only).
-const POWER_ON_REASON: [u8; 8] = [0xE2, 0x02, 0, 0, 0xFF, 0x05, 0, 0xFF];
+/// Power-on reasons, as the vendor firmware reads them: 5 (or 6) by hand, 4 the charger starting
+/// it, which runs a charging page only.
+const BY_HAND: u8 = 5;
+const CHARGER: u8 = 4;
+/// The first barometer and light reports after the power-on gesture (on a CC600: the barometer
+/// 400 ms after the first long press).
+const STREAM_FIRST: [u64; 2] = [400 * MS, 400 * MS];
 const VERSION: [u8; 10] = [0x01, 0x01, 0, 0, 0, 0, 0, 0, 0x02, 0x13];
 
 pub const KEY_HELD: u64 = 500 * MS;
@@ -81,7 +87,14 @@ pub struct Nrf {
     /// Last `gps_power` value: 0 off, 1 on (a restart of a running receiver), and how many came.
     pub gps_power: u8,
     pub gps_commands: u32,
+    /// Cut on battery by the power off: only the keys come, until the power-on gesture.
     pub powered_off: bool,
+    /// The sensor stream: RTC, barometer, light.
+    pub stream: bool,
+    /// The reason answered to the power-on and its query.
+    pub power_on_reason: u8,
+    /// The ESP32 was power-cycled (see `BoardModel::take_power_cycle`).
+    pub power_cycle: bool,
     rx: Vec<u8>,
     wire: Wire,
     keys: [Key; 3],
@@ -98,7 +111,7 @@ impl Nrf {
     pub fn new(unix_now: i64) -> Self {
         let mut n = Nrf {
             rtc_at_zero: unix_now, battery_mv: 3950, battery_percent: 80, power_source: 1, altitude_m: 150.0,
-            centi_celsius: 2000, light: 2500, gps_power: 0, gps_commands: 0, powered_off: false, rx: Vec::new(), wire: Wire::new(BAUD),
+            centi_celsius: 2000, light: 2500, gps_power: 0, gps_commands: 0, powered_off: false, stream: true, power_on_reason: BY_HAND, power_cycle: false, rx: Vec::new(), wire: Wire::new(BAUD),
             keys: [Key::default(); 3], next: [0, RTC_FIRST, 0, 0], light_step: 0, ant_scan_end: None,
             frames_in: 0, frames_out: 0, key_events: 0,
         };
@@ -114,6 +127,39 @@ impl Nrf {
     }
 
     fn report(&mut self, cycle: u64, cmd: u8, payload: [u8; 8]) { self.send(cycle, frame(4, cmd, &payload)); }
+
+    fn report_reason(&mut self, cycle: u64) {
+        self.report(cycle, 0x10, [0xE2, 0x02, 0, 0, 0xFF, self.power_on_reason, 0, 0xFF]);
+    }
+
+    /// `SendPowerOffCmd`: the ESP32 cut at once, even on USB power; there the charger starts it
+    /// again. The sensor stream stops either way.
+    fn power_off(&mut self) {
+        self.stream = false;
+        if self.power_source == 0 {
+            self.power_on_reason = CHARGER;
+            self.power_cycle = true;
+        } else {
+            self.powered_off = true;
+        }
+    }
+
+    /// The power key held: the ESP32 started if it was off, the sensor stream started if it was
+    /// not, the power-on reason and the version sent again.
+    fn power_on_gesture(&mut self, cycle: u64) {
+        self.power_on_reason = BY_HAND;
+        if self.powered_off {
+            self.powered_off = false;
+            self.power_cycle = true;
+            self.next[0] = cycle;
+        }
+        if !self.stream {
+            self.stream = true;
+            self.next[1..].copy_from_slice(&[cycle + RTC_FIRST, cycle + STREAM_FIRST[0], cycle + STREAM_FIRST[1]]);
+        }
+        self.report_reason(cycle);
+        self.send(cycle, frame(4, 0x01, &VERSION));
+    }
 
     fn rtc_frame(&self, cycle: u64) -> [u8; 8] {
         let t = self.unix(cycle);
@@ -150,17 +196,17 @@ impl Nrf {
         let ack = |grp| [at(0), grp, 0x01, 0, 0, 0, 0, 0];
         match (kind, cmd, at(0), at(1)) {
             // power-on reason query
-            (1, 0x10, 0xE2, 0x02) => self.report(cycle, 0x10, POWER_ON_REASON),
+            (1, 0x10, 0xE2, 0x02) => self.report_reason(cycle),
             (2, 0x10, 0xE2, grp) => {
                 match (grp, at(2), at(5)) {
-                    (0x02, 0x00, 0) => self.powered_off = true,
+                    (0x02, 0x00, 0) => return self.power_off(),
                     (0x02, 0x07, v) => { self.gps_power = v; self.gps_commands += 1; }
                     _ => {},
                 }
                 self.send(cycle, frame(5, 0x10, &ack(grp)));
                 // power on: the power-on reason and the version follow the acknowledge
                 if (grp, at(2), at(5)) == (0x02, 0x00, 1) {
-                    self.report(cycle, 0x10, POWER_ON_REASON);
+                    self.report_reason(cycle);
                     self.send(cycle, frame(4, 0x01, &VERSION));
                 }
             }
@@ -206,9 +252,11 @@ impl Nrf {
     fn keys_due(&mut self, cycle: u64) {
         for key in 0..3 {
             while let Some(at) = self.keys[key].next_long.filter(|&at| at <= cycle) {
+                let first = !self.keys[key].long;
                 self.keys[key].long = true;
                 self.keys[key].next_long = Some(at + KEY_REPEAT);
                 self.key_frame(at, key, KEY_LONG);
+                if key == 0 && first { self.power_on_gesture(at); }
             }
         }
     }
@@ -225,7 +273,8 @@ impl Nrf {
         }
         if self.powered_off { return; }
         const PERIOD: [u64; 4] = [300 * MS, 5000 * MS, 200 * MS, 300 * MS];
-        for (i, period) in PERIOD.iter().enumerate() {
+        let streams = if self.stream { 4 } else { 1 };
+        for (i, period) in PERIOD.iter().enumerate().take(streams) {
             while self.next[i] <= cycle {
                 let at = self.next[i];
                 self.next[i] += period;
@@ -260,7 +309,7 @@ impl Nrf {
 
     pub fn next_deadline(&self) -> u64 {
         let mut at = self.keys.iter().filter_map(|k| k.next_long).chain(self.ant_scan_end).min().unwrap_or(u64::MAX);
-        if !self.powered_off { at = at.min(*self.next.iter().min().unwrap()); }
+        if !self.powered_off { at = at.min(*self.next[..if self.stream { 4 } else { 1 }].iter().min().unwrap()); }
         if let Some(wire) = self.wire.next_deadline() { at = at.min(wire); }
         at
     }
@@ -335,12 +384,44 @@ mod tests {
         n.key(0, 2, true);
         n.key(100 * MS, 2, false);
         assert_eq!(drain(&mut n, 100 * MS).iter().map(key).collect::<Vec<_>>(), [(2, KEY_CLICK)]);
-        n.key(MS * 1000, 0, true);
+        n.key(MS * 1000, 1, true);
         assert!(drain(&mut n, MS * 1499).is_empty());
         assert_eq!(n.next_deadline(), MS * 1500);
-        n.key(MS * 2100, 0, false);
+        n.key(MS * 2100, 1, false);
         let got: Vec<_> = drain(&mut n, MS * 2100).iter().map(key).collect();
-        assert_eq!(got, [(0, KEY_LONG), (0, KEY_LONG), (0, KEY_LONG), (0, KEY_LONG_RELEASE)]);
+        assert_eq!(got, [(1, KEY_LONG), (1, KEY_LONG), (1, KEY_LONG), (1, KEY_LONG_RELEASE)]);
+    }
+
+    #[test]
+    fn a_power_off_on_usb_restarts_without_the_stream_until_the_power_key_is_held() {
+        let mut n = Nrf::new(1_789_649_884);
+        n.power_source = 0;
+        drain(&mut n, 0);
+        for b in frame(2, 0x10, &[0xE2, 0x02, 0, 0, 0, 0, 0, 0]) { n.receive(10, b); }
+        assert!(n.power_cycle && !n.powered_off);
+        let cmds = |f: &[Vec<u8>]| f.iter().map(|f| (f[5], f[6])).collect::<Vec<_>>();
+        // the battery and the charger's state only, then the charger's power-on reason
+        let f = drain(&mut n, 6000 * MS);
+        assert!(!f.is_empty() && cmds(&f).iter().all(|&c| c == (0x00, 0x52) || c == (0x10, 0xF0)));
+        for b in frame(1, 0x10, &[0xE2, 0x02, 0, 0, 0, 1, 0, 0]) { n.receive(6000 * MS, b); }
+        assert_eq!(drain(&mut n, 6000 * MS)[0][11], CHARGER);
+        // held: the long press, the reason by hand and the version, the barometer 400 ms later
+        n.key(7000 * MS, 0, true);
+        let f: Vec<_> = drain(&mut n, 7500 * MS).into_iter().filter(|f| ![0x52, 0xF0].contains(&f[6])).collect();
+        assert_eq!(cmds(&f), [(0x10, 0x49), (0x10, 0xE2), (0x01, 0x01)]);
+        assert_eq!(f[1][11], BY_HAND);
+        assert!(!cmds(&drain(&mut n, 7899 * MS)).contains(&(0x10, 0xF1)));
+        assert!(cmds(&drain(&mut n, 7900 * MS)).contains(&(0x10, 0xF1)));
+    }
+
+    #[test]
+    fn a_power_off_on_battery_lasts_until_the_power_key_is_held() {
+        let mut n = Nrf::new(0);
+        for b in frame(2, 0x10, &[0xE2, 0x02, 0, 0, 0, 0, 0, 0]) { n.receive(10, b); }
+        assert!(n.powered_off && !n.power_cycle);
+        n.key(1000 * MS, 0, true);
+        drain(&mut n, 1500 * MS);
+        assert!(!n.powered_off && n.power_cycle && n.stream);
     }
 
     #[test]

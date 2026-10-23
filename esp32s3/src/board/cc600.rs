@@ -8,6 +8,8 @@
 //!   - the keys, RTC, battery, barometer and light sensor sit behind an nRF52 on UART2
 //!     (TX 42, RX 41): [`nrf::Nrf`]. Its keys are the pseudo pins `key0` (top left), `key1`
 //!     (bottom left) and `key2` (bottom right), 64..=66, for `press` and the UI's buttons.
+//!     `board usb on|off` plugs or unplugs the USB power, `board battery PERCENT [MV]` sets the
+//!     battery; the nRF power-cycles the ESP32 (see [`nrf::Nrf`]).
 //!
 //! Pins from the open firmware (github.com/enavarro222/opencc600, `firmware/src/bin/main.rs`).
 use esp_soc::board::{BoardModel, VirtualCycle};
@@ -63,12 +65,22 @@ impl BoardModel for Cc600 {
     }
     fn command(&mut self, _cycle: VirtualCycle, line: &str) -> Result<(), String> {
         let words: Vec<&str> = line.split_whitespace().collect();
-        let ["gnss", args @ ..] = words.as_slice() else { return Err(format!("cc600: unknown command {line:?} (gnss ...)")) };
-        self.gnss.command(args)?;
+        fn number<T: std::str::FromStr>(w: &str) -> Result<T, String> { w.parse().map_err(|_| format!("cc600: bad number {w:?}")) }
+        match words.as_slice() {
+            ["usb", on @ ("on" | "off")] => { self.nrf.power_source = u8::from(*on == "off"); return Ok(()); }
+            ["battery", percent, mv @ ..] => {
+                self.nrf.battery_percent = number(percent)?;
+                if let [mv] = mv { self.nrf.battery_mv = number(mv)?; }
+                return Ok(());
+            }
+            ["gnss", args @ ..] => self.gnss.command(args)?,
+            _ => return Err(format!("cc600: unknown command {line:?} (gnss ..., usb on|off, battery PERCENT [MV])")),
+        }
         // the barometer follows the receiver's altitude
         if let Some(p) = self.gnss.position { self.nrf.altitude_m = p.alt_m; }
         Ok(())
     }
+    fn take_power_cycle(&mut self) -> bool { std::mem::take(&mut self.nrf.power_cycle) }
     fn host_input(&mut self, cycle: VirtualCycle, pin: u8, level: bool) -> bool {
         let Some(key) = pin.checked_sub(PIN_KEY0).filter(|&k| k < 3) else { return false };
         self.nrf.key(cycle, key as usize, !level);
