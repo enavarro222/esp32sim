@@ -68,7 +68,8 @@ and touch counts are nominal models; see EX227 for limits.
 Classic `--ble` uses the shared VHCI/HCI controller with an ELF containing
 controller symbols and function sizes. It installs a guest FreeRTOS task
 using the same windowed-Xtensa trampoline as S3. This is a virtual controller,
-with the shared one-link, MTU-23 and no-pairing limits; see EX228.
+with the shared one-link and no-pairing limits (ATT MTU 23 unless the central asks for more with
+`ble mtu N`); see EX228.
 `esp_bt_controller_enable` takes the mode of the config given to init, as IDF
 does (`components/bt/controller/esp32/bt.c`, v5.3.6): 1, 2 or 3 here, read at
 offset 20 of `esp_bt_controller_config_t` (IDF v4.3 to v6.0); init refuses a
