@@ -180,6 +180,7 @@ use seconds like the other script actions. For example:
 
 ```text
 0.5 ble connect
+0.55 ble mtu 247
 0.6 ble discover
 1.0 ble read 0x0010
 1.1 ble write 0x0010 68656c6c6f
@@ -190,10 +191,13 @@ enable to a discovered client configuration descriptor. Commands are validated w
 CLI arguments are parsed, before loading the ROM, and require `--ble`. `connect` waits for guest advertising;
 ATT commands wait for the connection and run in order, with one request outstanding.
 At exit, the CLI reports the number of queued or in-flight commands still pending.
-Writes are limited to 20 bytes. A scanning guest sees a virtual
-peripheral named `esp32sim` advertising the Battery Service.
+`ble mtu N` (23 to 247) asks for a larger ATT MTU, once per connection, as a phone does; the
+link keeps the smaller of N and the guest's answer, and `[ble]` reports it (`mtu 247`). Writes
+are limited to the MTU less 3: 20 bytes until then, 244 at most (an ATT packet and its L2CAP
+header in one 251-byte ACL packet). A guest asking its own exchange is answered 23. A
+scanning guest sees a virtual peripheral named `esp32sim` advertising the Battery Service.
 
-This models one unencrypted LE link, legacy advertisements and ATT MTU 23.
+This models one unencrypted LE link, legacy advertisements and an ATT MTU of 23 unless the central asks for more.
 It does not model RF, pairing, physical connection timing or the controller's
 registers. Unsupported HCI commands return Unknown Command. The callback task
 and its storage stay allocated until reboot. C6 initializes the guest NPL support

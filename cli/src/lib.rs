@@ -209,7 +209,7 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
             if words.next().is_none_or(|s| s.starts_with('#')) || words.next() != Some("ble") { continue }
             let command = words.collect::<Vec<_>>().join(" ").parse::<esp_soc::ble::peer::Command>()
                 .unwrap_or_else(|e| usage_error(&format!("script: line {}: {e}", ln + 1)));
-            if o.ble_full && matches!(command, esp_soc::ble::peer::Command::Discover | esp_soc::ble::peer::Command::Read(_) | esp_soc::ble::peer::Command::Write(..)) { usage_error(&format!("script: line {}: command requires HCI --ble", ln + 1)); }
+            if o.ble_full && matches!(command, esp_soc::ble::peer::Command::Discover | esp_soc::ble::peer::Command::Read(_) | esp_soc::ble::peer::Command::Write(..) | esp_soc::ble::peer::Command::Mtu(_)) { usage_error(&format!("script: line {}: command requires HCI --ble", ln + 1)); }
             if !o.ble && !o.ble_full { usage_error(&format!("script: line {}: BLE requires --ble and the application ELF", ln + 1)); }
         }
     }

@@ -42,7 +42,14 @@ enum Request {
     Descriptors,
     Read(u16),
     Write(u16),
+    /// The client MTU asked: the link's is the smaller of it and the server's answer.
+    Mtu(u16),
 }
+
+/// The default ATT MTU, until an exchange.
+const MTU_DEFAULT: u16 = 23;
+/// The largest ATT MTU asked: an ATT packet and its L2CAP header in one 251-byte ACL packet (LE Read Buffer Size).
+const MTU_MAX: u16 = 247;
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -55,6 +62,8 @@ pub enum Command {
     /// ATT Write Command: no response, nothing waits for it.
     WriteCommand(u16, Vec<u8>),
     ReadUuid([u8; 16], [u8; 16]),
+    /// ATT Exchange MTU: the client's MTU, the result is logged as `mtu N`.
+    Mtu(u16),
 }
 impl std::str::FromStr for Command {
     type Err = String;
@@ -66,8 +75,12 @@ impl std::str::FromStr for Command {
             ["disconnect"] => return Ok(Self::Disconnect),
             ["discover"] => return Ok(Self::Discover),
             ["read-uuid", service, characteristic] => return Ok(Self::ReadUuid(parse_uuid(service)?, parse_uuid(characteristic)?)),
+            ["mtu", n] => {
+                return n.parse().ok().filter(|n| (MTU_DEFAULT..=MTU_MAX).contains(n)).map(Self::Mtu)
+                    .ok_or_else(|| format!("BLE MTU between {MTU_DEFAULT} and {MTU_MAX}"));
+            }
             ["read" | "subscribe", _] | ["write" | "write-cmd", _, _] => {}
-            _ => return Err("expected connect, central-stop, disconnect, discover, read HANDLE, read-uuid SERVICE CHARACTERISTIC, write HANDLE HEX, write-cmd HANDLE HEX, subscribe CCC_HANDLE".into()),
+            _ => return Err("expected connect, central-stop, disconnect, discover, mtu N, read HANDLE, read-uuid SERVICE CHARACTERISTIC, write HANDLE HEX, write-cmd HANDLE HEX, subscribe CCC_HANDLE".into()),
         }
         let handle =
             if let Some(h) = parts[1].strip_prefix("0x") { u16::from_str_radix(h, 16) } else { parts[1].parse() }
@@ -79,8 +92,9 @@ impl std::str::FromStr for Command {
             "subscribe" => Self::Write(handle, vec![1, 0]),
             _ => {
                 let value = parts[2];
-                let bytes = hex_bytes(value).filter(|b| b.len() <= 20)
-                    .ok_or("BLE write requires at most 20 bytes of hexadecimal data")?;
+                // the link's MTU is checked when the write goes out
+                let bytes = hex_bytes(value).filter(|b| b.len() <= (MTU_MAX - 3) as usize)
+                    .ok_or("BLE write requires at most 244 bytes of hexadecimal data")?;
                 if parts[0] == "write-cmd" { Self::WriteCommand(handle, bytes) } else { Self::Write(handle, bytes) }
             }
         })
@@ -168,6 +182,10 @@ pub struct Peer {
     services: Vec<(u16, u16)>,
     service: usize,
     value: Vec<u8>,
+    /// The ATT MTU of the link: 23 until an exchange.
+    mtu: u16,
+    /// The central asked its MTU on this link: one exchange per connection.
+    mtu_asked: bool,
 }
 impl Peer {
     fn new(link: Link) -> Self {
@@ -184,6 +202,8 @@ impl Peer {
             services: Vec::new(),
             service: 0,
             value: vec![100],
+            mtu: MTU_DEFAULT,
+            mtu_asked: false,
         }
     }
     fn advertisement(&mut self, adv: Vec<u8>, scan_response: Vec<u8>) {
@@ -209,8 +229,21 @@ impl Peer {
                 break;
             }
             if !self.connected || self.guest_central { break; }
+            let too_long = |value: &Vec<u8>| value.len() > (self.mtu - 3) as usize;
+            if matches!(self.commands.front(), Some(Command::Write(_, v) | Command::WriteCommand(_, v)) if too_long(v)) {
+                self.commands.pop_front();
+                self.log.push(format!("write longer than the MTU ({}) less 3", self.mtu));
+                continue;
+            }
             match self.commands.pop_front().unwrap() {
                 Command::Connect | Command::CentralStop | Command::Disconnect | Command::ReadUuid(..) => unreachable!(),
+                Command::Mtu(_) if self.mtu_asked => self.log.push("mtu already exchanged on this link".into()),
+                Command::Mtu(n) => {
+                    // the MTU changes with the answer only: an ATT error leaves it at 23
+                    self.pending = Some(Request::Mtu(n));
+                    self.mtu_asked = true;
+                    self.att(&[2, n as u8, (n >> 8) as u8]);
+                }
                 Command::Discover => { self.services.clear(); self.discover(Request::Services, 1) }
                 Command::Read(handle) => {
                     self.pending = Some(Request::Read(handle));
@@ -261,6 +294,8 @@ impl Peer {
                     self.connecting = false;
                     self.connected = false;
                     self.pending = None;
+                    self.mtu = MTU_DEFAULT;
+                    self.mtu_asked = false;
                     self.log.push("disconnected".into());
                 }
                 LinkEvent::Reset => {
@@ -268,6 +303,8 @@ impl Peer {
                     self.connected = false;
                     self.advertising = false;
                     self.pending = None;
+                    self.mtu = MTU_DEFAULT;
+                    self.mtu_asked = false;
                 }
                 LinkEvent::Data(cid, p) => match cid {
                     4 => self.receive_att(&p),
@@ -324,6 +361,8 @@ impl Peer {
             self.log.push("empty ATT packet".into());
             return;
         }
+        // a guest asking its own exchange gets 23, as before the central's `mtu` command: a larger answer would change
+        // the notifications of every guest; the central asks with `mtu N`
         if p[0] == 2 && p.len() == 3 {
             self.att(&[3, 23, 0]);
             return;
@@ -368,6 +407,11 @@ impl Peer {
                 String::from_utf8_lossy(&p[1..])
             )),
             Request::Write(handle) if p == [0x13] => self.log.push(format!("write complete handle=0x{handle:04x}")),
+            // the link's MTU is the smaller of the two
+            Request::Mtu(asked) if p.len() == 3 && p[0] == 3 => {
+                self.mtu = asked.min(word(&p[1..])).max(MTU_DEFAULT);
+                self.log.push(format!("mtu {}", self.mtu));
+            }
             Request::Services | Request::Characteristics | Request::Descriptors => {
                 let expected = match kind {
                     Request::Services => 0x11,
@@ -564,7 +608,10 @@ mod tests {
         assert_eq!(hex_bytes("00aAFF"), Some(vec![0,170,255]));
         for bad in ["0", "0g", "é0"] { assert_eq!(hex_bytes(bad), None); }
         assert_eq!("write 1 00aAFF".parse::<Command>().unwrap(), Command::Write(1, vec![0,170,255]));
-        for bad in ["write 1 0", "write 1 zz", "write 1 é0", "write 1 000000000000000000000000000000000000000000"] { assert!(bad.parse::<Command>().is_err()); }
+        for bad in ["write 1 0", "write 1 zz", "write 1 é0"] { assert!(bad.parse::<Command>().is_err()); }
+        // up to the largest MTU less 3; the link's own MTU is checked when the write goes out
+        assert!(format!("write 1 {}", "00".repeat(244)).parse::<Command>().is_ok());
+        assert!(format!("write 1 {}", "00".repeat(245)).parse::<Command>().is_err());
         assert_eq!(read_by_type(0x1234, 0x5678), [8,0x34,0x12,0x78,0x56,3,0x28]);
     }
 
@@ -685,6 +732,46 @@ mod tests {
         assert_eq!(c.pop_packet().unwrap(), [4, 14, 4, 1, 3, 12, 0x12]);
         cmd(&mut c, 0x7777, &[]);
         assert_eq!(c.pop_packet().unwrap(), [4, 14, 4, 1, 0x77, 0x77, 1]);
+    }
+    #[test]
+    fn central_asks_a_larger_mtu_and_writes_up_to_it() {
+        let mut c = Session::default();
+        connect(&mut c);
+        assert!(c.command("mtu 300").is_err());
+        c.command("mtu 247").unwrap();
+        assert_eq!(&c.pop_packet().unwrap()[9..], &[2, 247, 0]);
+        // the server takes less: the smaller one counts
+        acl(&mut c, &[3, 185, 0]);
+        assert!(c.peer.log.iter().any(|s| s == "mtu 185"));
+        let long = |n: usize| format!("write-cmd 3 {}", "ab".repeat(n));
+        c.command(&long(182)).unwrap();
+        let sent: Vec<_> = std::iter::from_fn(|| c.pop_packet()).collect();
+        assert_eq!(sent.last().map(|p| p.len() - 9), Some(3 + 182));
+        c.command(&long(183)).unwrap();
+        assert!(c.peer.log.iter().any(|s| s.starts_with("write longer than the MTU (185)")));
+        assert!(c.pop_packet().is_none());
+        // one exchange per connection
+        c.command("mtu 200").unwrap();
+        assert!(c.peer.log.iter().any(|s| s == "mtu already exchanged on this link"));
+        assert!(c.pop_packet().is_none());
+    }
+    #[test]
+    fn a_refused_mtu_stays_at_23_and_a_new_link_starts_at_23() {
+        let mut c = Session::default();
+        connect(&mut c);
+        c.command("mtu 247").unwrap();
+        while c.pop_packet().is_some() {}
+        // the server answers an ATT error (request not supported)
+        acl(&mut c, &[1, 2, 0, 0, 6]);
+        assert_eq!(c.peer.mtu, MTU_DEFAULT);
+        c.command(&format!("write-cmd 3 {}", "ab".repeat(21))).unwrap();
+        assert!(c.peer.log.iter().any(|s| s.starts_with("write longer than the MTU (23)")));
+        // an exchanged MTU does not outlive the guest's reset
+        c.peer.mtu = 247;
+        c.peer.mtu_asked = true;
+        c.peer.link.borrow_mut().to_peer.push_back(LinkEvent::Reset);
+        c.peer.poll();
+        assert_eq!((c.peer.mtu, c.peer.mtu_asked), (MTU_DEFAULT, false));
     }
     #[test]
     fn central_discovers_reads_writes_subscribes_and_receives_notifications() {
