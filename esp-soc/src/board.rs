@@ -125,6 +125,9 @@ pub trait BoardModel {
     /// A text command for a device model of the board (script `board <line>`, the UI's
     /// `board_cmd`), such as a position for a GNSS receiver.
     fn command(&mut self, _cycle: VirtualCycle, line: &str) -> Result<(), String> { Err(format!("this board takes no commands: {line}")) }
+    /// True once each time the board cut the chip's power and gave it back, such as a power
+    /// manager restarting it: the chip then goes through a power-on reset. Honoured by the S3.
+    fn take_power_cycle(&mut self) -> bool { false }
     /// A pin by the name scripts and the UI use (`btn1`, `sw`, ...).
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
     /// The rotary encoder's (CLK, DT) pins, if there is one.

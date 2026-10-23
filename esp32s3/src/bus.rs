@@ -894,6 +894,11 @@ impl SocBus {
                 self.irq_dirty = true;
             }
         }
+        if self.board.take_power_cycle() {
+            self.periph.rtc.sw_reset = true;
+            self.periph.rtc.reset_cause = esp_periph::RST_POWERON;
+            self.irq_dirty = true;
+        }
         if self.board_edges { self.irq_dirty |= esp_soc::gpio::drain_board_inputs(&mut *self.board, &mut self.periph.gpio, &mut self.gpio_events, self.cycles); }
         self.complete_spi2_dma();
         self.deliver_spi2_transfer();
