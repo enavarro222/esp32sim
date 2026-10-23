@@ -1,0 +1,116 @@
+name: fork-release
+# The fork's builds for opencc600 (its demo and its emulator tests), so that they need not build the
+# emulator: a `cc600-*` tag (or a run by hand for a tag that exists) builds the native esp32sim for
+# three platforms and the WebAssembly emulator, and publishes them as that tag's release with their
+# SHA-256 sums. opencc600 pins the tag (tools/demo/esp32sim.rev) and checks the sums.
+# Separate from release.yml (upstream's v* releases, kept as they are). A run by hand needs this file
+# on the default branch, or `gh workflow run fork-release.yml --ref board-cc600 -f tag=cc600-...`.
+on:
+  push:
+    tags: ['cc600-*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: an existing cc600-* tag to build and publish
+        required: true
+permissions:
+  contents: read
+env:
+  # the tag through the environment, never pasted into a script
+  TAG: ${{ inputs.tag || github.ref_name }}
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: macos-15
+            platform: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: The tag is a cc600-* tag
+        run: |
+          case "$TAG" in cc600-*) ;; *) echo "::error::not a cc600-* tag: $TAG"; exit 1;; esac
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release -p esp32sim --bin esp32sim
+      - name: Package
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          # macOS tar adds ._ files without it
+          COPYFILE_DISABLE: '1'
+        run: |
+          dir="esp32sim-$TAG-$PLATFORM"
+          mkdir -p "dist/$dir/tools"
+          cp target/release/esp32sim LICENSE README.md "dist/$dir/"
+          cp tools/fetch-rom-elfs.sh "dist/$dir/tools/"
+          tar -czf "dist/$dir.tar.gz" -C dist "$dir"
+          tar -tzf "dist/$dir.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*.tar.gz
+  wasm:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: The tag is a cc600-* tag
+        run: |
+          case "$TAG" in cc600-*) ;; *) echo "::error::not a cc600-* tag: $TAG"; exit 1;; esac
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the WebAssembly emulator
+        run: tools/wasm-build.sh
+      - name: Production WASM sections (no DWARF, profile names retained)
+        run: node tools/check-wasm-sections.mjs web/wasm/esp32sim.wasm
+      # what opencc600's demo copies (tools/demo/build.sh): the module, the worker's scripts, the ROM fetcher
+      - name: Package
+        run: |
+          dir="esp32sim-$TAG-wasm"
+          mkdir -p "dist/$dir/tools"
+          cp web/wasm/esp32sim.wasm web/wasm/worker.js web/wasm/jit.mjs web/wasm/pacing.mjs web/wasm/experiments.mjs LICENSE "dist/$dir/"
+          cp tools/fetch-rom-elfs.sh "dist/$dir/tools/"
+          tar -czf "dist/$dir.tar.gz" -C dist "$dir"
+          tar -tzf "dist/$dir.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: dist/*.tar.gz
+  publish:
+    needs: [native, wasm]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz | tee "esp32sim-$TAG-SHA256SUMS.txt"
+      # created with its files at once: never a release without them
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*.tar.gz dist/*SHA256SUMS.txt
+          else
+            commit=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG^{}" "refs/tags/$TAG" | head -1 | cut -c1-12)
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "esp32sim for opencc600 ($TAG)" \
+              --notes "Built from $commit for opencc600: the native esp32sim (Linux x86_64 and arm64, macOS arm64) and the WebAssembly emulator of its demo. Check the files against the SHA256SUMS." \
+              dist/*.tar.gz dist/*SHA256SUMS.txt
+          fi
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
