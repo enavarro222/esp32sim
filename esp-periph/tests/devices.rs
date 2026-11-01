@@ -90,6 +90,18 @@ fn timer_group_resets_to_divider_one_which_divides_by_two() {
 }
 
 #[test]
+fn timer_group_on_xtal_counts_at_half_the_apb_rate() {
+    let mut g = TimerGroup::new();
+    Device::write(&mut g, 0x0, (1 << 31) | (1 << 30) | (1 << 10) | (2 << 13) | (1 << 9));   // enabled, up, alarm, divider 2, USE_XTAL
+    Device::write(&mut g, 0x10, 10);                         // alarm = 10 -> 40 APB ticks
+    Device::write(&mut g, 0x70, 1);
+    Device::tick(&mut g, 39);
+    assert_eq!(Device::irq_sources(&g), 0);
+    Device::tick(&mut g, 1);
+    assert_eq!(Device::irq_sources(&g), 1);
+}
+
+#[test]
 fn timer_group_one_shot_alarm_at_the_counter_fires_at_once() {
     // esp-rtos arms 0 ticks, on a counter it has just reset to 0, for a wakeup already due.
     let mut g = TimerGroup::new();
