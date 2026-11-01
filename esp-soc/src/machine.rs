@@ -536,6 +536,7 @@ impl<S: Soc> Machine<S> {
             || self.bus.block_break()
             || self.cores[0].waiting()
             || self.cores[0].irq_pending()
+            || S::core_state(&self.bus, 0) != CoreState::Running
             || (1..S::CORES).any(|core| S::core_state(&self.bus, core) == CoreState::Running)
         {
             return None;
@@ -582,7 +583,7 @@ impl<S: Soc> Machine<S> {
             self.refresh_irq();
             if self.bus.sw_reset() { self.drain_console(); return Stop::SwReset; }
             if self.bus.cycles() >= self.max_cycles { self.drain_console(); return Stop::Halted; }
-            for (i, state) in on.iter_mut().enumerate().take(S::CORES).skip(1) {
+            for (i, state) in on.iter_mut().enumerate().take(S::CORES) {
                 *state = match S::core_state(&self.bus, i) {
                     CoreState::Reset => { self.core_held[i] = true; false }
                     CoreState::Held => false,
@@ -594,10 +595,10 @@ impl<S: Soc> Machine<S> {
             }
             if let Some(stop) = self.observe_idle_pcs(&on[..S::CORES]) { self.drain_console(); return stop; }
             for (i, state) in idle.iter_mut().enumerate().take(S::CORES) { *state = !on[i] || (self.cores[i].waiting() && !self.cores[i].irq_pending()); }
-            if idle[..S::CORES].iter().all(|&x| x) && !slow_path {
+            if idle[..S::CORES].iter().all(|&x| x) && (!slow_path || on[..S::CORES].iter().all(|&x| !x)) {
                 // Stop at every known source of new work, including core-local timers. Device
                 // deadlines alone do not include CCOMPARE or host-script actions.
-                let limit = S::IDLE_CHUNK.min(max_insns - n).min(self.bus.cpu_cycles_for_bus(self.max_cycles - self.bus.cycles()));
+                let limit = if slow_path { 1 } else { S::IDLE_CHUNK }.min(max_insns - n).min(self.bus.cpu_cycles_for_bus(self.max_cycles - self.bus.cycles()));
                 let chunk = self.idle_budget(limit, &on);
                 for (i, &enabled) in on.iter().enumerate().take(S::CORES) { if enabled { self.cores[i].idle_advance(chunk as u32); } }
                 n += chunk;
@@ -870,7 +871,7 @@ impl<S: Soc> Machine<S> {
                 // batch-s1: the accesses may have moved a device deadline or a core's run state. Re-bound
                 // from this round's start (core 0 already counted it in `n`); the loop top would re-plan.
                 open = false;
-                if (1..S::CORES).any(|i| on[i] != (S::core_state(&self.bus, i) == CoreState::Running)) { break; }
+                if (0..S::CORES).any(|i| on[i] != (S::core_state(&self.bus, i) == CoreState::Running)) { break; }
                 k = self.bb_quanta(k * q, *n - q);
                 self.bus.set_defer(true);
             }

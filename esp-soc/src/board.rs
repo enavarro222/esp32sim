@@ -130,6 +130,9 @@ pub trait BoardModel {
     /// True once each time the board cut the chip's power and gave it back, such as a power
     /// manager restarting it: the chip then goes through a power-on reset. Honoured by the S3.
     fn take_power_cycle(&mut self) -> bool { false }
+    /// Whether the board supplies power to the chip. An always-on co-processor can keep
+    /// receiving host inputs while the chip's cores are held, then request a power-on reset.
+    fn chip_powered(&self) -> bool { true }
     /// A pin by the name scripts and the UI use (`btn1`, `sw`, ...).
     fn named_pin(&self, _name: &str) -> Option<u8> { None }
     /// The rotary encoder's (CLK, DT) pins, if there is one.
