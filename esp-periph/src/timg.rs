@@ -1,7 +1,7 @@
 //! Timer group: two 54-bit timers on APB with prescaler and alarm, plus the RTC calibration register.
 use crate::device::{Device, WriteEffect};
 use crate::regram::RegRam;
-use crate::{RTC_SLOW_HZ, XTAL_HZ};
+use crate::{APB_HZ, RTC_SLOW_HZ, XTAL_HZ};
 use emu_core::ClockDomain;
 
 // ------------------------------------------------------------------ Timer group (T0/T1 + WDT + RTC calibration)
@@ -82,10 +82,12 @@ impl Timer {
     /// The prescaler's divisor from TnCONFIG.DIVIDER: "when TIMGn_Tx_DIVIDER is either 1 or 2, the
     /// clock divisor is 2; when TIMGn_Tx_DIVIDER is 0, the clock divisor is 65536" (the ESP32 TRM,
     /// 11.2.1, as esp-hal 1.2.2 `src/timer/timg.rs` quotes it and computes its ticks). IDF writes 0
-    /// for 65536 and never 1 (IDF v5.5.1 components/hal/esp32s3/include/hal/timer_ll.h).
+    /// for 65536 and never 1 (IDF v5.5.1 components/hal/esp32s3/include/hal/timer_ll.h). In APB ticks:
+    /// USE_XTAL (bit 9, IDF v5.5.4 timer_group_reg.h, S3 and C3) counts XTAL_CLK, half the APB rate.
     #[inline(always)]
     fn divisor(config: u32) -> u64 {
-        match (config >> 13) & 0xffff { 0 => 65536, 1 => 2, d => u64::from(d) }
+        let div = match (config >> 13) & 0xffff { 0 => 65536, 1 => 2, d => u64::from(d) };
+        if config & (1 << 9) != 0 { div * (APB_HZ / XTAL_HZ) } else { div }
     }
     /// APB ticks to the alarm, saturating: 64-bit counters (classic ESP32) can be further away
     /// than `u64::MAX` APB ticks.
