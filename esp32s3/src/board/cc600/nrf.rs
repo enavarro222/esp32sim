@@ -121,6 +121,22 @@ impl Nrf {
 
     pub fn unix(&self, cycle: u64) -> i64 { self.rtc_at_zero + (cycle / CPU_HZ) as i64 }
 
+    /// USB powers an otherwise switched-off device into its charging screen. In that state
+    /// the battery supply remains disabled, so removing USB cuts the ESP32's power immediately.
+    /// A manually switched-on device keeps running from its battery when USB is removed.
+    pub fn set_usb_power(&mut self, cycle: u64, connected: bool) {
+        self.power_source = u8::from(!connected);
+        if connected && self.powered_off {
+            self.powered_off = false;
+            self.power_on_reason = CHARGER;
+            self.power_cycle = true;
+            self.next[0] = cycle;
+        } else if !connected && !self.stream {
+            self.powered_off = true;
+            self.power_cycle = false;
+        }
+    }
+
     fn send(&mut self, cycle: u64, f: Vec<u8>) {
         self.wire.send(cycle, &f);
         self.frames_out += 1;

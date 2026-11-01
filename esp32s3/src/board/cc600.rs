@@ -63,11 +63,17 @@ impl BoardModel for Cc600 {
     fn next_deadline(&self) -> Option<VirtualCycle> {
         Some(self.gnss.next_deadline().map_or(self.nrf.next_deadline(), |g| g.min(self.nrf.next_deadline())))
     }
-    fn command(&mut self, _cycle: VirtualCycle, line: &str) -> Result<(), String> {
+    fn command(&mut self, cycle: VirtualCycle, line: &str) -> Result<(), String> {
         let words: Vec<&str> = line.split_whitespace().collect();
         fn number<T: std::str::FromStr>(w: &str) -> Result<T, String> { w.parse().map_err(|_| format!("cc600: bad number {w:?}")) }
         match words.as_slice() {
-            ["usb", on @ ("on" | "off")] => { self.nrf.power_source = u8::from(*on == "off"); return Ok(()); }
+            ["usb", on @ ("on" | "off")] => {
+                // USB can restore power before the next device tick publishes the reset.
+                // Discard the unpowered LCD's RAM now so its old charging frame cannot flash up.
+                if *on == "on" && self.nrf.powered_off { self.panel = DcsPanel::st7789(); }
+                self.nrf.set_usb_power(cycle, *on == "on");
+                return Ok(());
+            }
             ["battery", percent, mv @ ..] => {
                 self.nrf.battery_percent = number(percent)?;
                 if let [mv] = mv { self.nrf.battery_mv = number(mv)?; }
@@ -80,7 +86,12 @@ impl BoardModel for Cc600 {
         if let Some(p) = self.gnss.position { self.nrf.altitude_m = p.alt_m; }
         Ok(())
     }
-    fn take_power_cycle(&mut self) -> bool { std::mem::take(&mut self.nrf.power_cycle) }
+    fn take_power_cycle(&mut self) -> bool {
+        let reset = std::mem::take(&mut self.nrf.power_cycle);
+        if reset { self.panel = DcsPanel::st7789(); }
+        reset
+    }
+    fn chip_powered(&self) -> bool { !self.nrf.powered_off }
     fn host_input(&mut self, cycle: VirtualCycle, pin: u8, level: bool) -> bool {
         let Some(key) = pin.checked_sub(PIN_KEY0).filter(|&k| k < 3) else { return false };
         self.nrf.key(cycle, key as usize, !level);
@@ -96,8 +107,12 @@ impl BoardModel for Cc600 {
         if wide { for w in data.as_chunks::<2>().0 { p.word(u16::from_le_bytes(*w)); } }
         else { p.dc = true; for &b in data { p.byte(b); } }
     }
-    fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> { Some((240, 320, self.panel.gram.clone(), self.panel.pixels_written)) }
-    fn display_version(&self) -> u64 { self.panel.pixels_written }
+    fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> {
+        let pixels = if self.nrf.powered_off { vec![0; 240 * 320] } else { self.panel.gram.clone() };
+        Some((240, 320, pixels, self.display_version()))
+    }
+    // A power cut must publish a black frame even when no new pixels reached the LCD RAM.
+    fn display_version(&self) -> u64 { self.panel.pixels_written ^ (u64::from(self.nrf.powered_off) << 63) }
     fn display_quiet_push(&self) -> bool { true }
     fn display_frames(&self) -> u64 { self.panel.frames }
     fn gram(&self) -> Option<(Vec<u16>, usize, usize)> { Some((self.panel.gram.clone(), self.panel.cols, self.panel.rows)) }
@@ -115,6 +130,36 @@ impl BoardModel for Cc600 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unplugging_the_switched_off_charger_blanks_the_screen_and_usb_wakes_it_again() {
+        let mut b = Cc600::new();
+        b.lcd_i80(Some(0x2c), &[0x00, 0xf8], true);
+        b.command(0, "usb on").unwrap();
+        // The firmware switches off; USB restarts it into charging mode without the sensor stream.
+        for byte in nrf::frame(2, 0x10, &[0xE2, 0x02, 0, 0, 0, 0, 0, 0]) { b.nrf.receive(1, byte); }
+        assert!(b.take_power_cycle());
+        b.lcd_i80(Some(0x2c), &[0x00, 0xf8], true);
+        let visible = b.display_version();
+        assert_eq!(b.display().unwrap().2[0], 0xf800);
+        b.command(2, "usb off").unwrap();
+        assert!(b.nrf.powered_off);
+        assert!(!b.take_power_cycle());
+        assert_ne!(b.display_version(), visible, "publish the power cut without another LCD write");
+        assert!(b.display().unwrap().2.iter().all(|&pixel| pixel == 0));
+        b.command(3, "usb on").unwrap();
+        assert!(!b.nrf.powered_off);
+        assert!(b.display().unwrap().2.iter().all(|&pixel| pixel == 0), "old LCD RAM must stay invisible before the reboot tick");
+        assert!(b.take_power_cycle(), "inserting USB starts the charging screen again");
+        assert!(b.display().unwrap().2.iter().all(|&pixel| pixel == 0), "the old charging frame must not reappear during boot");
+        // A long press switches on the battery supply; unplugging must then leave the device on.
+        b.host_input(4, PIN_KEY0, false);
+        b.uart_rx(4 + nrf::KEY_HELD);
+        b.lcd_i80(Some(0x2c), &[0x00, 0xf8], true);
+        b.command(5 + nrf::KEY_HELD, "usb off").unwrap();
+        assert!(!b.nrf.powered_off);
+        assert_eq!(b.display().unwrap().2[0], 0xf800);
+    }
 
     /// What esp-hal's `I8080::send` hands over for the firmware's window + RAMWR: 8-bit
     /// parameters, then the 16-bit little-endian frame buffer.

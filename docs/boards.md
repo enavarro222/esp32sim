@@ -287,6 +287,10 @@ The keys are behind the nRF, not on GPIOs: the pseudo pins `key0` (top left), `k
 click and a press longer than 0.5 s a long press, repeated every 250 ms like the real keys. The RTC
 starts at the host's time and takes the firmware's `set_rtc`; the battery reads 80 % on battery, the
 barometer 150 m in the standard atmosphere. `power_off` stops the stream (the report says so).
+On battery it also holds both ESP32 cores and blanks the display; the nRF keeps listening for the
+next long press. With `board usb on`, switching off restarts into charging mode without the stream.
+`board usb off` cuts power in that mode, while a manually switched-on device keeps running on
+battery. Inserting USB into an off device starts charging mode again.
 
 The receiver has no fix until it is given a position: `board gnss LAT LON [ALT_M [SPEED_KMH
 [COURSE_DEG]]]` in a script or `{"t":"board_cmd","line":"gnss ..."}` from the page, sent again for

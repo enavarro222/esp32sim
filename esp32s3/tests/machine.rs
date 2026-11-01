@@ -37,6 +37,33 @@ fn idle_cores_skip_time() {
 }
 
 #[test]
+fn cc600_power_off_stops_both_cores_until_the_nrf_power_on_gesture() {
+    use esp_soc::{Soc, SocBus};
+    use esp32s3::board::cc600::{Cc600, nrf, PIN_KEY0};
+    let mut m = machine();
+    park(&mut m, 0, IRAM, &SPIN);
+    SocBus::load_bytes(&mut m.bus, RESET, &SPIN).unwrap();
+    m.bus.write32(0x600c_0000, 0b010).unwrap();
+    m.run(1024);
+    assert!(m.cores.iter().all(|core| core.insn_count() > 0));
+    let mut board = Cc600::new();
+    for byte in nrf::frame(2, 0x10, &[0xE2, 0x02, 0, 0, 0, 0, 0, 0]) { board.nrf.receive(m.bus.cycles, byte); }
+    m.bus.board = Box::new(board);
+    m.bus.attach_board_devices();
+    let counts: Vec<_> = m.cores.iter().map(|core| core.insn_count()).collect();
+    m.max_cycles = m.bus.cycles + esp32s3::S3::CPU_HZ;
+    assert!(matches!(m.run(u64::MAX), Stop::Halted));
+    assert_eq!(m.cores.iter().map(|core| core.insn_count()).collect::<Vec<_>>(), counts);
+    assert!(!m.bus.board.chip_powered());
+    m.bus.gpio_set_input(PIN_KEY0, false);
+    m.max_cycles = m.bus.cycles + esp32s3::S3::CPU_HZ;
+    assert!(matches!(m.run(u64::MAX), Stop::SwReset), "the nRF must wake the chip with a power-on reset");
+    assert!(m.bus.board.chip_powered());
+    assert_eq!(m.bus.reset_cause(), esp_periph::RST_POWERON);
+    assert_eq!(m.cores.iter().map(|core| core.insn_count()).collect::<Vec<_>>(), counts);
+}
+
+#[test]
 fn idle_stops_at_requested_cycle_and_instruction_limits() {
     for (max_cycles, max_insns, expected, halted) in [(1, u64::MAX, 1, true), (1000, 3, 3, false)] {
         let mut m = machine();
@@ -333,6 +360,18 @@ fn browser_offchip_blocks_are_single_core_scheduler_transactions() {
 
     m.bus.write32(0x600c_0000, 0b010).unwrap();
     assert_eq!(m.browser_external_block_budget(7), None, "core 1 is running");
+}
+
+#[test]
+fn browser_offchip_blocks_cannot_execute_a_powered_off_cc600() {
+    use esp32s3::board::cc600::{Cc600, nrf};
+    let mut m = machine64();
+    park(&mut m, 0, IRAM, &SPIN);
+    assert_eq!(m.browser_external_block_budget(64), Some(64));
+    let mut board = Cc600::new();
+    for byte in nrf::frame(2, 0x10, &[0xE2, 0x02, 0, 0, 0, 0, 0, 0]) { board.nrf.receive(0, byte); }
+    m.bus.board = Box::new(board);
+    assert_eq!(m.browser_external_block_budget(64), None);
 }
 
 #[test]
