@@ -16,6 +16,7 @@ use esp_soc::board::{BoardModel, VirtualCycle};
 use esp_soc::devices::DcsPanel;
 use esp_soc::uart::{UartInput, UartRoute};
 
+pub mod ant;
 pub mod gnss;
 pub mod nrf;
 pub mod wire;
@@ -77,6 +78,11 @@ impl BoardModel for Cc600 {
             ["battery", percent, mv @ ..] => {
                 self.nrf.battery_percent = number(percent)?;
                 if let [mv] = mv { self.nrf.battery_mv = number(mv)?; }
+                return Ok(());
+            }
+            ["ant", args @ ..] => {
+                let frames = self.nrf.ant.command(cycle, args)?;
+                self.nrf.ant_frames(cycle, frames);
                 return Ok(());
             }
             ["gnss", args @ ..] => self.gnss.command(args)?,

@@ -8,7 +8,7 @@
 //! 3.3 Hz. The sensor stream (RTC, barometer, light) runs from reset, as after the power key's
 //! power-on gesture (a long press of key 0), and stops when the nRF cuts the ESP32's power: the
 //! power off, then on USB power the charger starting it again at once, without the stream until
-//! that gesture (opencc600 `docs/REVERSE_NOTES.md`). ANT+ answers the commands but finds no sensor.
+//! that gesture (opencc600 `docs/REVERSE_NOTES.md`). ANT+ sensors are configured with the board’s `ant` command.
 use crate::periph::CPU_HZ;
 use super::wire::Wire;
 
@@ -101,7 +101,7 @@ pub struct Nrf {
     /// Next report of each periodic stream: battery + source, RTC, barometer, light.
     next: [u64; 4],
     light_step: usize,
-    ant_scan_end: Option<u64>,
+    pub ant: super::ant::Ant,
     pub frames_in: u64,
     pub frames_out: u64,
     pub key_events: u64,
@@ -112,7 +112,7 @@ impl Nrf {
         let mut n = Nrf {
             rtc_at_zero: unix_now, battery_mv: 3950, battery_percent: 80, power_source: 1, altitude_m: 150.0,
             centi_celsius: 2000, light: 2500, gps_power: 0, gps_commands: 0, powered_off: false, stream: true, power_on_reason: BY_HAND, power_cycle: false, rx: Vec::new(), wire: Wire::new(BAUD),
-            keys: [Key::default(); 3], next: [0, RTC_FIRST, 0, 0], light_step: 0, ant_scan_end: None,
+            keys: [Key::default(); 3], next: [0, RTC_FIRST, 0, 0], light_step: 0, ant: super::ant::Ant::default(),
             frames_in: 0, frames_out: 0, key_events: 0,
         };
         n.send(0, frame(4, 0x01, &VERSION));
@@ -140,6 +140,10 @@ impl Nrf {
     fn send(&mut self, cycle: u64, f: Vec<u8>) {
         self.wire.send(cycle, &f);
         self.frames_out += 1;
+    }
+
+    pub fn ant_frames(&mut self, cycle: u64, frames: Vec<Vec<u8>>) {
+        if !self.powered_off { for f in frames { self.send(cycle, f); } }
     }
 
     fn report(&mut self, cycle: u64, cmd: u8, payload: [u8; 8]) { self.send(cycle, frame(4, cmd, &payload)); }
@@ -208,6 +212,7 @@ impl Nrf {
     }
 
     fn command(&mut self, cycle: u64, kind: u8, cmd: u8, p: &[u8]) {
+        if let Some(frames) = self.ant.receive(cycle, kind, cmd, p) { self.ant_frames(cycle, frames); return; }
         let at = |i: usize| p.get(i).copied().unwrap_or(0);
         let ack = |grp| [at(0), grp, 0x01, 0, 0, 0, 0, 0];
         match (kind, cmd, at(0), at(1)) {
@@ -235,11 +240,6 @@ impl Nrf {
             // the vendor's slave mode query (`24 01`): byte 5 of the answer, 1 the application, else
             // its bootloader
             (2, 0x01, 0x24, _) => self.send(cycle, frame(5, 0x01, &[0x24, 0x01, 0xFF, 0xFF, 0x00, 0x01, 0xFF, 0xFF])),
-            (2, 0x10, 0xE1, _) => {
-                let seconds = u64::from(u16::from_le_bytes([at(3), at(4)]));
-                self.ant_scan_end = Some(cycle + seconds * CPU_HZ);
-                self.send(cycle, frame(5, 0x10, &ack(0x02)));
-            }
             (2, c, _, _) => self.send(cycle, frame(5, c, &[0; 8])),
             _ => {},
         }
@@ -283,11 +283,9 @@ impl Nrf {
             self.rtc_at_zero = (esp_soc::host::unix_time_ms() / 1000) as i64 - (cycle / CPU_HZ) as i64;
         }
         self.keys_due(cycle);
-        if self.ant_scan_end.is_some_and(|at| at <= cycle) {
-            self.ant_scan_end = None;
-            self.report(cycle, 0x10, [0xF3, 0x03, 0, 0, 0, 0, 0, 0]);
-        }
         if self.powered_off { return; }
+        let frames = self.ant.advance(cycle);
+        self.ant_frames(cycle, frames);
         const PERIOD: [u64; 4] = [300 * MS, 5000 * MS, 200 * MS, 300 * MS];
         let streams = if self.stream { 4 } else { 1 };
         for (i, period) in PERIOD.iter().enumerate().take(streams) {
@@ -324,7 +322,7 @@ impl Nrf {
     pub fn transmit(&mut self, cycle: u64) -> Vec<u8> { self.wire.transmit(cycle) }
 
     pub fn next_deadline(&self) -> u64 {
-        let mut at = self.keys.iter().filter_map(|k| k.next_long).chain(self.ant_scan_end).min().unwrap_or(u64::MAX);
+        let mut at = self.keys.iter().filter_map(|k| k.next_long).chain(self.ant.next_deadline().filter(|_| !self.powered_off)).min().unwrap_or(u64::MAX);
         if !self.powered_off { at = at.min(*self.next[..if self.stream { 4 } else { 1 }].iter().min().unwrap()); }
         if let Some(wire) = self.wire.next_deadline() { at = at.min(wire); }
         at
@@ -354,6 +352,22 @@ mod tests {
     }
 
     /// The frames of the CC600 captures in opencc600's `crates/nrf-link/tests/frames.rs`.
+    #[test]
+    fn an_ant_timer_cannot_stall_the_power_key_while_switched_off() {
+        let mut n = Nrf::new(1_789_649_884);
+        drain(&mut n, CPU_HZ);
+        n.ant.command(CPU_HZ, &["120", "6001", "1", "idle"]).unwrap();
+        n.power_off();
+        drain(&mut n, 2 * CPU_HZ);
+        // External sensors keep broadcasting while the counter is off; that must not add a past deadline.
+        n.ant.command(2 * CPU_HZ, &["120", "6001", "1", "0000000000000096"]).unwrap();
+        assert_eq!(n.next_deadline(), u64::MAX);
+        n.key(3 * CPU_HZ, 0, true);
+        assert_eq!(n.next_deadline(), 3 * CPU_HZ + KEY_HELD);
+        drain(&mut n, 3 * CPU_HZ + KEY_HELD);
+        assert!(!n.powered_off && n.power_cycle && n.stream);
+    }
+
     #[test]
     fn reports_match_the_captured_frames() {
         // 2026-09-17 12:58:05 UTC, a Thursday

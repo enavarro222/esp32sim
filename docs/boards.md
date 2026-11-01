@@ -314,6 +314,10 @@ The receiver has no fix until it is given a position: `board gnss LAT LON [ALT_M
 every point of a replayed track; the barometer follows the altitude. `board gnss nofix` drops the
 fix, `board gnss ttff 30` sets the time to first fix after power-on (3 s). Its UTC is the host's.
 
+ANT+ sensors (heart rate 120, speed and cadence 121, power 11) sit behind the nRF too. `board ant TYPE
+NUMBER TRANSMISSION HEX_PAGE|idle|off` makes one broadcast an 8-byte page, stay discoverable without
+measurements, or fall silent as a flat battery does; pages only reach a channel the firmware opened.
+
 ## `none` — bare module
 
 No devices; console only. For stock ESP-IDF projects (`examples/hello_world`).
