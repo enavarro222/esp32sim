@@ -1197,4 +1197,28 @@ mod tests {
         assert_eq!(status(&mut c, 0x2028, &remove(1)), 0x02);
         assert!(c.drain_log().iter().all(|l| !l.contains("unsupported")));
     }
+
+    #[test]
+    fn address_resolution_is_switched_only_while_not_advertising_or_scanning() {
+        let mut c = Session::default();
+        let script: Vec<(u16, Vec<u8>, u8)> = vec![
+            (0x202d, vec![1], 0),
+            (0x200a, vec![1], 0),
+            (0x202d, vec![0], 0x0c),
+            (0x202d, vec![1], 0x0c),
+            (0x202d, vec![2], 0x12),
+            (0x200a, vec![0], 0),
+            (0x202d, vec![0], 0),
+            (0x200c, vec![1, 0], 0),
+            (0x202d, vec![1], 0x0c),
+            (0x200c, vec![0, 0], 0),
+            (0x202d, vec![1], 0),
+        ];
+        for (op, p, expected) in script {
+            cmd(&mut c, op, &p);
+            // the advertising reports of the scan come first
+            let r = core::iter::from_fn(|| c.pop_packet()).find(|r| r[1] == 14).unwrap();
+            assert_eq!((&r[4..6], r[6]), (&[op as u8, (op >> 8) as u8][..], expected), "0x{op:04x} {p:02x?}");
+        }
+    }
 }

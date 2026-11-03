@@ -77,6 +77,7 @@ pub struct Controller {
     link: Link,
     cycles: u64,
     advertising: bool,
+    scanning: bool,
     adv: Vec<u8>,
     scan_response: Vec<u8>,
     connected: bool,
@@ -97,6 +98,7 @@ impl Controller {
             link,
             cycles: 0,
             advertising: false,
+            scanning: false,
             adv: Vec::new(),
             scan_response: Vec::new(),
             connected: false,
@@ -226,6 +228,7 @@ impl Controller {
                 self.adv.clear();
                 self.scan_response.clear();
                 self.active_scan = false;
+                self.scanning = false;
                 self.packets.clear();
                 self.resolving.clear();
                 self.complete(op, &[0]);
@@ -335,6 +338,7 @@ impl Controller {
                     self.complete(op, &[0x12]);
                     return;
                 }
+                self.scanning = p[0] == 1;
                 self.complete(op, &[0]);
                 if p[0] == 1 { self.emit(LinkEvent::Scan(self.active_scan)); } else { self.emit(LinkEvent::ScanStopped); }
             }
@@ -422,7 +426,13 @@ impl Controller {
             // No resolvable private address exists, so Unknown Connection Identifier, as the S3
             // answers for an entry it has made none for.
             LE_READ_PEER_RESOLVABLE_ADDRESS | LE_READ_LOCAL_RESOLVABLE_ADDRESS => self.complete(op, &[2, 0, 0, 0, 0, 0, 0]),
-            LE_SET_ADDRESS_RESOLUTION_ENABLE => self.complete(op, &[if p[0] > 1 { 0x12 } else { 0 }]),
+            // Command Disallowed while advertising or scanning (Core Vol 4, Part E, §7.8.44): an S3
+            // answered it so with its advertising on. A create connection completes at once here, so
+            // it is never pending.
+            LE_SET_ADDRESS_RESOLUTION_ENABLE => {
+                let status = if p[0] > 1 { 0x12 } else if self.advertising || self.scanning { 0x0c } else { 0 };
+                self.complete(op, &[status]);
+            }
             // The S3 refuses 0 s only, 3601 s too is accepted.
             LE_SET_RPA_TIMEOUT => self.complete(op, &[if word(p) == 0 { 0x12 } else { 0 }]),
             LE_SET_PRIVACY_MODE => {
