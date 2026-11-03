@@ -1,7 +1,7 @@
 name: fork-release
 # The fork's builds for opencc600 (its demo and its emulator tests), so that they need not build the
 # emulator: a `cc600-*` tag (or a run by hand for a tag that exists) builds the native esp32sim for
-# three platforms and the WebAssembly emulator, and publishes them as that tag's release with their
+# two platforms and the WebAssembly emulator, and publishes them as that tag's release with their
 # SHA-256 sums. opencc600 pins the tag (tools/demo/esp32sim.rev) and checks the sums.
 # Separate from release.yml (upstream's v* releases, kept as they are). A run by hand needs this file
 # on the default branch, or `gh workflow run fork-release.yml --ref board-cc600 -f tag=cc600-...`.
@@ -28,8 +28,7 @@ jobs:
             platform: linux-x86_64
           - runner: ubuntu-24.04-arm
             platform: linux-arm64
-          - runner: macos-15
-            platform: macos-arm64
+          # no macOS: nobody uses it, and its runners can stay unavailable long enough to cancel the release
     runs-on: ${{ matrix.runner }}
     steps:
       - name: The tag is a cc600-* tag
@@ -45,8 +44,6 @@ jobs:
       - name: Package
         env:
           PLATFORM: ${{ matrix.platform }}
-          # macOS tar adds ._ files without it
-          COPYFILE_DISABLE: '1'
         run: |
           dir="esp32sim-$TAG-$PLATFORM"
           mkdir -p "dist/$dir/tools"
@@ -110,7 +107,7 @@ jobs:
           else
             commit=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG^{}" "refs/tags/$TAG" | head -1 | cut -c1-12)
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "esp32sim for opencc600 ($TAG)" \
-              --notes "Built from $commit for opencc600: the native esp32sim (Linux x86_64 and arm64, macOS arm64) and the WebAssembly emulator of its demo. Check the files against the SHA256SUMS." \
+              --notes "Built from $commit for opencc600: the native esp32sim (Linux x86_64 and arm64) and the WebAssembly emulator of its demo. Check the files against the SHA256SUMS." \
               dist/*.tar.gz dist/*SHA256SUMS.txt
           fi
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
