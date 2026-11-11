@@ -70,6 +70,13 @@ impl<S: Soc> Machine<S> {
             w.send_binary(&b);
             self.ws.audio_sent = pcm.len();
         }
+        // the virtual controller's `[ble]` lines, kept since the page's first `ble` message (or since
+        // `esp32sim_ble_virtual` in the browser build); a native run still prints them
+        while let Some(line) = self.bus.ble_log_take() {
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("[ble] {line}");
+            w.send_text(&format!("{{\"t\":\"ble\",\"line\":\"{}\"}}", json_escape(&line)));
+        }
         let board = self.bus.board_ref();
         let grids: Vec<(&'static str, Vec<[u8; 3]>, u64)> =
             board.led_grids().into_iter().map(|(id, leds, updates)| (id, leds.to_vec(), updates)).collect();
@@ -174,6 +181,15 @@ impl<S: Soc> Machine<S> {
                     let v = field("v").unwrap_or_default();
                     let n = v.strip_prefix("0x").map(|h| u32::from_str_radix(h, 16).ok()).unwrap_or_else(|| v.parse().ok());
                     if let Some(n) = n { self.bus.set_strap(n); }
+                }
+                // a line for the virtual BLE peer (`connect`, `discover`, `write HANDLE HEX`, ...);
+                // what it reports comes back as {"t":"ble","line":...}
+                "ble" => {
+                    self.bus.ble_keep_log();
+                    let line = field("line").unwrap_or_default();
+                    if let Err(error) = self.bus.ble_command(&line) {
+                        w.send_text(&format!("{{\"t\":\"ble\",\"error\":\"{}\"}}", json_escape(&error)));
+                    }
                 }
                 "board_cmd" => {
                     let (cycle, line) = (self.bus.cycles(), field("line").unwrap_or_default());
